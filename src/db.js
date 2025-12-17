@@ -15,7 +15,12 @@ import { db } from "./firebase";
 
 const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
 
+const assertDb = () => {
+  if (!db) throw new Error("Firebase is not configured (missing VITE_FIREBASE_* env vars).");
+};
+
 export const createGroup = async ({ name, hostUid, hostEmail, members }) => {
+  assertDb();
   const groupName = String(name || "").trim();
   if (!groupName) throw new Error("Group name is required");
 
@@ -77,30 +82,35 @@ export const createGroup = async ({ name, hostUid, hostEmail, members }) => {
 };
 
 export const listHostedGroups = async ({ hostUid }) => {
+  assertDb();
   const q = query(collection(db, "groups"), where("hostUid", "==", hostUid));
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 };
 
 export const listMemberGroups = async ({ emailLower }) => {
+  assertDb();
   const q = query(collection(db, "groups"), where("memberEmails", "array-contains", normalizeEmail(emailLower)));
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 };
 
 export const listGroupInvitations = async ({ groupId }) => {
+  assertDb();
   const q = query(collection(db, "invitations"), where("groupId", "==", groupId));
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 };
 
 export const listGroupResponses = async ({ groupId }) => {
+  assertDb();
   const q = query(collection(db, "responses"), where("groupId", "==", groupId));
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 };
 
 export const submitGroupResponse = async ({ groupId, respondentUid, respondentEmailLower, feedbackItems }) => {
+  assertDb();
   const responsesCollection = collection(db, "responses");
   const docRef = await addDoc(responsesCollection, {
     groupId,
@@ -113,6 +123,7 @@ export const submitGroupResponse = async ({ groupId, respondentUid, respondentEm
 };
 
 export const upsertUserProfile = async ({ uid, emailLower, firstName, role }) => {
+  assertDb();
   const userRef = doc(db, "users", uid);
   await setDoc(
     userRef,
@@ -127,11 +138,13 @@ export const upsertUserProfile = async ({ uid, emailLower, firstName, role }) =>
 };
 
 export const getUserProfile = async ({ uid }) => {
+  assertDb();
   const snap = await getDoc(doc(db, "users", uid));
   return snap.exists() ? { id: snap.id, ...snap.data() } : null;
 };
 
 export const redeemInvitationForUser = async ({ uid, emailLower, tempPassword }) => {
+  assertDb();
   const normalizedEmail = normalizeEmail(emailLower);
   const q = query(collection(db, "invitations"), where("emailLower", "==", normalizedEmail));
   const snap = await getDocs(q);
@@ -153,6 +166,7 @@ export const redeemInvitationForUser = async ({ uid, emailLower, tempPassword })
 };
 
 export const deleteGroupCascade = async ({ groupId }) => {
+  assertDb();
   const batch = writeBatch(db);
 
   batch.delete(doc(db, "groups", groupId));
