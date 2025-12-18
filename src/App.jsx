@@ -1293,7 +1293,33 @@ const InvitationSuccess = ({ groupName, invitations, onClose }) => {
 const InviteCredentials = ({ invite }) => {
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = () => {
+  const copyTextToClipboard = async (text) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // fall through to execCommand
+    }
+
+    try {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.setAttribute("readonly", "");
+      el.style.position = "fixed";
+      el.style.left = "-9999px";
+      document.body.appendChild(el);
+      el.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(el);
+      return ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopy = async () => {
     const appUrl = window.location.origin;
     const copyText =
       "Hi " +
@@ -1305,7 +1331,11 @@ const InviteCredentials = ({ invite }) => {
       "\nTemporary Password: " +
       invite.tempPassword +
       "\n\nComplete your survey to help your team grow!";
-    navigator.clipboard.writeText(copyText);
+    const ok = await copyTextToClipboard(copyText);
+    if (!ok) {
+      alert("Copy failed. Try selecting the text manually, or use a different browser.");
+      return;
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -1782,23 +1812,37 @@ const InvitationModal = ({ group, onClose }) => {
 const SurveyScreen = ({ group, onComplete }) => {
   const { user } = useAuth();
   const [currentMemberIdx, setCurrentMemberIdx] = useState(0);
-  const recipients = (group.members || []).filter(
-    (m) => String(m.emailLower || "").toLowerCase() !== user.emailLower
-  );
-  const [responses, setResponses] = useState(() =>
-    recipients.map((m) => ({
-      recipientName: m.name,
-      recipientEmailLower: String(m.emailLower || "").toLowerCase(),
-      strengths: "",
-      improvements: "",
-      score: 0
-    }))
-  );
+  const members = group.members || [];
+  const userIsParticipant = members.some((m) => String(m.emailLower || "").toLowerCase() === user.emailLower);
+  const others = members.filter((m) => String(m.emailLower || "").toLowerCase() !== user.emailLower);
+
+  const selfMember = userIsParticipant
+    ? members.find((m) => String(m.emailLower || "").toLowerCase() === user.emailLower) || {
+        name: user.firstName || "Me",
+        emailLower: user.emailLower
+      }
+    : null;
+
+  const recipients = userIsParticipant && selfMember ? [...others, selfMember] : others;
+
+  const [responses, setResponses] = useState(() => {
+    return recipients.map((m) => {
+      const emailLower = String(m.emailLower || "").toLowerCase();
+      return {
+        recipientName: m.name,
+        recipientEmailLower: emailLower,
+        isSelf: emailLower === user.emailLower,
+        strengths: "",
+        improvements: "",
+        score: 0
+      };
+    });
+  });
   const [showSuccess, setShowSuccess] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  const totalPoints = recipients.length * 100;
-  const allocatedPoints = responses.reduce((sum, r) => sum + r.score, 0);
+  const totalPoints = others.length * 100;
+  const allocatedPoints = responses.reduce((sum, r) => (r.isSelf ? sum : sum + r.score), 0);
   const remainingPoints = totalPoints - allocatedPoints;
 
   if (recipients.length === 0) {
@@ -1848,12 +1892,16 @@ const SurveyScreen = ({ group, onComplete }) => {
 
   const updateResponse = (field, value) => {
     const updated = [...responses];
-    updated[currentMemberIdx] = { ...updated[currentMemberIdx], [field]: value };
+    if (field === "score" && updated[currentMemberIdx]?.isSelf) {
+      updated[currentMemberIdx] = { ...updated[currentMemberIdx], score: 0 };
+    } else {
+      updated[currentMemberIdx] = { ...updated[currentMemberIdx], [field]: value };
+    }
     setResponses(updated);
   };
 
   const canProceed = () => {
-    return currentResponse.strengths.trim() && currentResponse.improvements.trim() && currentResponse.score > 0;
+    return currentResponse.strengths.trim() && currentResponse.improvements.trim();
   };
 
   const handleNext = () => {
@@ -1973,17 +2021,24 @@ const SurveyScreen = ({ group, onComplete }) => {
               onChange={(e) => updateResponse("improvements", e.target.value)}
             />
 
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Score for {currentMember.name}</label>
-              <input
-                type="number"
-                min="0"
-                max={totalPoints}
-                className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white text-2xl font-bold focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                value={currentResponse.score || ""}
-                onChange={(e) => updateResponse("score", parseInt(e.target.value, 10) || 0)}
-              />
-            </div>
+            {currentResponse.isSelf ? (
+              <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <p className="text-sm text-gray-300 font-medium mb-1">Self feedback</p>
+                <p className="text-xs text-gray-400">Self feedback doesn’t affect your point totals.</p>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Score for {currentMember.name}</label>
+                <input
+                  type="number"
+                  min="0"
+                  max={totalPoints}
+                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white text-2xl font-bold focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  value={currentResponse.score || ""}
+                  onChange={(e) => updateResponse("score", parseInt(e.target.value, 10) || 0)}
+                />
+              </div>
+            )}
 
             <div
               className={`p-4 rounded-lg border-2 ${
