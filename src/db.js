@@ -153,6 +153,9 @@ export const listMemberGroups = async ({ uid, emailLower }) => {
     throwIfError(error);
     const groups = (data || []).map(mapGroupRow);
     if (groups.length > 0) return groups;
+    throw new Error(
+      "Your invite was redeemed, but your database is blocking group reads (RLS). Run supabase/patch.sql in Supabase, then reload schema."
+    );
   }
 
   // Fall back to email-based membership for hosts / legacy groups.
