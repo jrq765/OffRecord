@@ -140,17 +140,23 @@ export const listMemberGroups = async ({ uid, emailLower }) => {
   assertSupabase();
   const normalized = normalizeEmail(emailLower);
 
-  // Prefer "redeemed invitation" membership; fall back to array membership for legacy/host use.
+  // Prefer "redeemed invitation" membership; avoid embedded selects (they can fail silently if the relationship isn't cached).
   const { data: inviteRows, error: inviteError } = await supabase
     .from("invitations")
-    .select("group:groups(*)")
+    .select("group_id")
     .eq("redeemed_by_uid", uid);
   throwIfError(inviteError);
 
-  const groupsFromInvites = (inviteRows || []).map((r) => r.group).filter(Boolean).map(mapGroupRow);
+  const groupIds = Array.from(new Set((inviteRows || []).map((r) => r.group_id).filter(Boolean)));
+  if (groupIds.length > 0) {
+    const { data, error } = await supabase.from("groups").select("*").in("id", groupIds);
+    throwIfError(error);
+    const groups = (data || []).map(mapGroupRow);
+    if (groups.length > 0) return groups;
+  }
 
-  if (groupsFromInvites.length > 0) return groupsFromInvites;
-
+  // Fall back to email-based membership for hosts / legacy groups.
+  if (!normalized) return [];
   const { data, error } = await supabase.from("groups").select("*").contains("member_emails", [normalized]);
   throwIfError(error);
   return (data || []).map(mapGroupRow);
