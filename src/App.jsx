@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   Plus,
   Trash2,
+  UserPlus,
   UserMinus,
   LogOut,
   Mail,
@@ -22,6 +23,7 @@ import {
   listGroupResponses,
   listHostedGroups,
   listMemberGroups,
+  createGroupInvitations,
   redeemInvitationForUser,
   submitGroupResponse,
   updateGroupMembers,
@@ -889,6 +891,7 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
   const { user } = useAuth();
   const [showSurvey, setShowSurvey] = useState(false);
   const [showInvites, setShowInvites] = useState(false);
+  const [showManageMembers, setShowManageMembers] = useState(false);
   const [showPDFModal, setShowPDFModal] = useState(false);
   const [statusNonce, setStatusNonce] = useState(0);
   const [removingSelf, setRemovingSelf] = useState(false);
@@ -1037,6 +1040,20 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
     return <InvitationModal group={group} onClose={() => setShowInvites(false)} />;
   }
 
+  if (showManageMembers) {
+    return (
+      <ManageMembersModal
+        group={group}
+        onClose={() => setShowManageMembers(false)}
+        onUpdated={async () => {
+          setStatus((s) => ({ ...s, loading: true }));
+          setStatusNonce((n) => n + 1);
+          await onRefresh?.();
+        }}
+      />
+    );
+  }
+
   if (showPDFModal) {
     return (
       <FeedbackPDFModal
@@ -1063,6 +1080,15 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
               title="View Invitations"
             >
               <Mail className="w-5 h-5" />
+            </button>
+          )}
+          {user.isHost && (
+            <button
+              onClick={() => setShowManageMembers(true)}
+              className="text-gray-500 hover:text-purple-400 transition"
+              title="Manage Members"
+            >
+              <UserPlus className="w-5 h-5" />
             </button>
           )}
           {user.isHost && status.userIsParticipant && (
@@ -1975,6 +2001,243 @@ const InvitationModal = ({ group, onClose }) => {
           <Button onClick={onClose} className="w-full">
             Close
           </Button>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+// ============================================================================
+// MANAGE MEMBERS MODAL
+// ============================================================================
+
+const ManageMembersModal = ({ group, onClose, onUpdated }) => {
+  const { user } = useAuth();
+  const [existingMembers, setExistingMembers] = useState(() => (Array.isArray(group.members) ? group.members : []));
+  const [newMembers, setNewMembers] = useState([{ email: "", name: "" }]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [createdInvites, setCreatedInvites] = useState([]);
+  const [sending, setSending] = useState(false);
+  const [sentSummary, setSentSummary] = useState(null);
+
+  const addNewRow = () => setNewMembers((m) => (m.length >= 10 ? m : [...m, { email: "", name: "" }]));
+  const removeNewRow = (idx) => setNewMembers((m) => (m.length <= 1 ? m : m.filter((_, i) => i !== idx)));
+  const updateNewRow = (idx, field, value) =>
+    setNewMembers((m) => {
+      const copy = [...m];
+      copy[idx] = { ...copy[idx], [field]: value };
+      return copy;
+    });
+
+  const removeExistingMember = (emailLower) => {
+    const normalized = String(emailLower || "").toLowerCase();
+    setExistingMembers((m) => (m || []).filter((x) => String(x.emailLower || "").toLowerCase() !== normalized));
+  };
+
+  const handleSave = async () => {
+    setError("");
+    setSentSummary(null);
+    setCreatedInvites([]);
+
+    const normalizedExisting = (existingMembers || [])
+      .map((m) => ({
+        emailLower: String(m.emailLower || "").trim().toLowerCase(),
+        name: String(m.name || "").trim()
+      }))
+      .filter((m) => m.emailLower && m.name);
+
+    const normalizedNew = (newMembers || [])
+      .map((m) => ({
+        emailLower: String(m.email || "").trim().toLowerCase(),
+        name: String(m.name || "").trim()
+      }))
+      .filter((m) => m.emailLower && m.name);
+
+    const all = [...normalizedExisting, ...normalizedNew];
+    const allEmails = all.map((m) => m.emailLower);
+    if (new Set(allEmails).size !== allEmails.length) {
+      setError("Each member must have a unique email");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const beforeEmails = new Set((group.members || []).map((m) => String(m.emailLower || "").toLowerCase()));
+      const added = normalizedNew.filter((m) => !beforeEmails.has(m.emailLower));
+
+      const invitationsToCreate = added
+        .filter((m) => m.emailLower !== String(group.hostEmailLower || "").toLowerCase())
+        .map((m) => ({ ...m, tempPassword: generateTempPassword() }));
+
+      await updateGroupMembers({ groupId: group.id, members: all });
+
+      let created = [];
+      if (invitationsToCreate.length > 0) {
+        created = await createGroupInvitations({
+          groupId: group.id,
+          hostUid: user.uid,
+          hostEmailLower: group.hostEmailLower,
+          members: invitationsToCreate
+        });
+        setCreatedInvites(
+          created.map((i) => ({
+            email: i.emailLower,
+            name: i.name,
+            tempPassword: i.tempPassword
+          }))
+        );
+      }
+
+      setExistingMembers(all.map((m) => ({ emailLower: m.emailLower, name: m.name })));
+      setNewMembers([{ email: "", name: "" }]);
+
+      if (created.length > 0) {
+        try {
+          setSending(true);
+          const res = await sendGroupInviteEmails({ groupId: group.id, emails: created.map((i) => i.emailLower) });
+          setSentSummary(res);
+        } catch (err) {
+          setSentSummary({ error: String(err?.message || "Email sending failed") });
+        } finally {
+          setSending(false);
+        }
+      }
+
+      await onUpdated?.();
+    } catch (err) {
+      setError(err?.message || "Failed to update group");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50 overflow-y-auto">
+      <Card className="w-full max-w-3xl my-8">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h2 className="text-2xl font-bold text-white">Manage Members</h2>
+            <p className="text-gray-400 text-sm mt-1">{group.name}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none">
+            ×
+          </button>
+        </div>
+
+        <div className="space-y-6">
+          <div>
+            <div className="text-sm font-medium text-gray-300 mb-3">Current members</div>
+            <div className="space-y-2">
+              {(existingMembers || []).length === 0 ? (
+                <div className="text-gray-400 text-sm">No members yet.</div>
+              ) : (
+                (existingMembers || []).map((m, idx) => {
+                  const emailLower = String(m.emailLower || "").toLowerCase();
+                  const isHostEmail = emailLower && emailLower === String(group.hostEmailLower || "").toLowerCase();
+                  return (
+                    <div key={`${emailLower}-${idx}`} className="flex gap-2 items-center">
+                      <input
+                        className="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white"
+                        value={emailLower}
+                        disabled
+                      />
+                      <input
+                        className="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white"
+                        value={String(m.name || "").trim()}
+                        disabled
+                      />
+                      <button
+                        onClick={() => removeExistingMember(emailLower)}
+                        className="px-4 py-3 bg-red-900/30 border border-red-500 rounded-lg text-red-400 hover:bg-red-900/50 transition"
+                        title={isHostEmail ? "Remove host from members list" : "Remove member"}
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-sm font-medium text-gray-300 mb-3">Add new members</div>
+            <div className="space-y-3">
+              {newMembers.map((m, idx) => (
+                <div key={idx} className="flex gap-2">
+                  <input
+                    className="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    placeholder="email@example.com"
+                    type="email"
+                    value={m.email}
+                    onChange={(e) => updateNewRow(idx, "email", e.target.value)}
+                  />
+                  <input
+                    className="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    placeholder="Full Name"
+                    value={m.name}
+                    onChange={(e) => updateNewRow(idx, "name", e.target.value)}
+                  />
+                  {newMembers.length > 1 && (
+                    <button
+                      onClick={() => removeNewRow(idx)}
+                      className="px-4 py-3 bg-red-900/30 border border-red-500 rounded-lg text-red-400 hover:bg-red-900/50 transition"
+                      title="Remove row"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {newMembers.length < 10 && (
+              <button
+                onClick={addNewRow}
+                className="mt-3 text-purple-400 hover:text-purple-300 text-sm flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" />
+                Add another
+              </button>
+            )}
+          </div>
+
+          {error && (
+            <div className="bg-red-900/30 border border-red-500 rounded-lg p-3 text-red-400 text-sm">{error}</div>
+          )}
+
+          <div className="flex gap-3">
+            <Button variant="secondary" onClick={onClose} className="flex-1" disabled={saving || sending}>
+              Close
+            </Button>
+            <Button onClick={handleSave} className="flex-1" disabled={saving || sending}>
+              {saving ? "Saving..." : sending ? "Sending..." : "Save & Invite"}
+            </Button>
+          </div>
+
+          {sentSummary?.error && (
+            <div className="bg-red-900/30 border border-red-500 rounded-lg p-3 text-red-400 text-sm">
+              {sentSummary.error}
+            </div>
+          )}
+          {sentSummary && !sentSummary.error && (
+            <div className="bg-gray-900/30 border border-gray-700 rounded-lg p-3 text-gray-200 text-sm">
+              Sent {sentSummary.sent || 0} invite email(s){sentSummary.provider ? ` via ${sentSummary.provider}` : ""}.
+              {Number(sentSummary.failed || 0) > 0 ? ` Failed: ${sentSummary.failed}.` : ""}
+            </div>
+          )}
+
+          {createdInvites.length > 0 && (
+            <div className="bg-gray-700/50 rounded-lg p-4">
+              <h4 className="text-sm font-semibold text-white mb-3">New invite credentials</h4>
+              <div className="space-y-3">
+                {createdInvites.map((invite, idx) => (
+                  <InviteCredentials key={idx} invite={invite} />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </Card>
     </div>

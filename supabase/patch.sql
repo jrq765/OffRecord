@@ -119,6 +119,21 @@ using (
   or redeemed_by_uid = auth.uid()
 );
 
+-- Hosts can create invitations (needed for adding users to existing groups)
+drop policy if exists "invites_create_host" on public.invitations;
+create policy "invites_create_host"
+on public.invitations for insert
+to authenticated
+with check (host_uid = auth.uid());
+
+-- Hosts can update invitations (optional, but matches base schema expectations)
+drop policy if exists "invites_update_host" on public.invitations;
+create policy "invites_update_host"
+on public.invitations for update
+to authenticated
+using (host_uid = auth.uid())
+with check (host_uid = auth.uid());
+
 -- Allow invite members to read their groups (works with anonymous auth: no email claim needed)
 alter table public.groups enable row level security;
 drop policy if exists "groups_read_host_or_member" on public.groups;

@@ -86,7 +86,7 @@ exports.handler = async (event) => {
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length) : "";
     if (!token) return json(401, { error: "Missing Authorization bearer token" });
 
-    const { groupId, appUrl } = JSON.parse(event.body || "{}");
+    const { groupId, appUrl, emails } = JSON.parse(event.body || "{}");
     if (!groupId) return json(400, { error: "Missing groupId" });
 
     const supabaseUrl = requireEnv("SUPABASE_URL");
@@ -153,7 +153,18 @@ exports.handler = async (event) => {
         ? createGmailTransporter({ user: gmailUser, appPassword: gmailAppPassword })
         : null;
 
-    const inviteList = invites || [];
+    let inviteList = invites || [];
+    const emailFilter = Array.isArray(emails)
+      ? new Set(
+          emails
+            .map((e) => String(e || "").trim().toLowerCase())
+            .filter(Boolean)
+        )
+      : null;
+
+    if (emailFilter && emailFilter.size > 0) {
+      inviteList = inviteList.filter((inv) => emailFilter.has(String(inv.email_lower || "").trim().toLowerCase()));
+    }
     const concurrency = provider === "gmail" ? 1 : 4;
 
     await runWithConcurrency({

@@ -1,6 +1,6 @@
 import { supabase, supabaseInitError } from "./supabase";
 
-export const sendGroupInviteEmails = async ({ groupId }) => {
+export const sendGroupInviteEmails = async ({ groupId, emails }) => {
   if (supabaseInitError || !supabase) {
     throw new Error("Supabase is not configured.");
   }
@@ -17,6 +17,7 @@ export const sendGroupInviteEmails = async ({ groupId }) => {
     },
     body: JSON.stringify({
       groupId,
+      emails: Array.isArray(emails) && emails.length > 0 ? emails : undefined,
       appUrl: typeof window === "undefined" ? "" : window.location.origin
     })
   });
@@ -27,4 +28,3 @@ export const sendGroupInviteEmails = async ({ groupId }) => {
   }
   return payload;
 };
-

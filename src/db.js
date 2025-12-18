@@ -129,6 +129,44 @@ export const createGroup = async ({ name, hostUid, hostEmail, hostName, members 
   };
 };
 
+export const createGroupInvitations = async ({ groupId, hostUid, hostEmailLower, members }) => {
+  assertSupabase();
+  const normalizedGroupId = String(groupId || "").trim();
+  if (!normalizedGroupId) throw new Error("groupId is required");
+
+  const hostEmail = normalizeEmail(hostEmailLower);
+  if (!hostEmail) throw new Error("hostEmailLower is required");
+
+  const normalizedMembers = (members || [])
+    .map((m) => ({
+      emailLower: normalizeEmail(m.emailLower || m.email),
+      name: String(m.name || "").trim(),
+      tempPassword: String(m.tempPassword || "").trim()
+    }))
+    .filter((m) => m.emailLower && m.name && m.tempPassword);
+
+  const emails = normalizedMembers.map((m) => m.emailLower);
+  if (emails.includes(hostEmail)) throw new Error("Don't create an invitation for the host email");
+  if (new Set(emails).size !== emails.length) throw new Error("Each member must have a unique email");
+
+  if (normalizedMembers.length === 0) return [];
+
+  const invitesInsert = normalizedMembers.map((m) => ({
+    group_id: normalizedGroupId,
+    host_uid: hostUid,
+    host_email_lower: hostEmail,
+    email_lower: m.emailLower,
+    name: m.name,
+    temp_password: m.tempPassword,
+    redeemed_by_uid: null,
+    redeemed_at: null
+  }));
+
+  const { data, error } = await supabase.from("invitations").insert(invitesInsert).select("*");
+  throwIfError(error);
+  return (data || []).map(mapInvitationRow);
+};
+
 export const listHostedGroups = async ({ hostUid }) => {
   assertSupabase();
   const { data, error } = await supabase.from("groups").select("*").eq("host_uid", hostUid);
