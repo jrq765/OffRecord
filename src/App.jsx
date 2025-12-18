@@ -171,7 +171,13 @@ const AuthProvider = ({ children }) => {
       const msg = String(err?.message || "").toLowerCase();
       if (msg.includes("invalid login credentials")) {
         const { data, error } = await supabase.auth.signUp({ email: emailLower, password });
-        if (error) throw error;
+        if (error) {
+          const m = String(error.message || "").toLowerCase();
+          if (m.includes("already") || m.includes("registered")) {
+            throw new Error("Invalid email or temporary password");
+          }
+          throw error;
+        }
         if (!data.session) throw new Error("Check your email to confirm your account, then sign in.");
         sessionUser = data.session.user;
       } else {
