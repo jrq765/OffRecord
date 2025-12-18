@@ -1,26 +1,61 @@
-import {
-  addDoc,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  where,
-  writeBatch
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { supabase, supabaseInitError } from "./supabase";
 
 const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
 
-const assertDb = () => {
-  if (!db) throw new Error("Firebase is not configured (missing VITE_FIREBASE_* env vars).");
+const assertSupabase = () => {
+  if (supabaseInitError || !supabase) {
+    throw new Error("Supabase is not configured (missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY).");
+  }
+};
+
+const throwIfError = (error) => {
+  if (!error) return;
+  const message = error?.message || "Request failed";
+  throw new Error(message);
+};
+
+const mapGroupRow = (row) => {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    hostUid: row.host_uid,
+    hostEmailLower: row.host_email_lower,
+    members: Array.isArray(row.members) ? row.members : [],
+    memberEmails: Array.isArray(row.member_emails) ? row.member_emails : []
+  };
+};
+
+const mapInvitationRow = (row) => {
+  if (!row) return null;
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    hostUid: row.host_uid,
+    hostEmailLower: row.host_email_lower,
+    emailLower: row.email_lower,
+    name: row.name,
+    tempPassword: row.temp_password,
+    redeemedByUid: row.redeemed_by_uid,
+    redeemedAt: row.redeemed_at,
+    createdAt: row.created_at
+  };
+};
+
+const mapResponseRow = (row) => {
+  if (!row) return null;
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    respondentUid: row.respondent_uid,
+    respondentEmailLower: row.respondent_email_lower,
+    submittedAt: row.submitted_at,
+    feedbackItems: Array.isArray(row.feedback_items) ? row.feedback_items : row.feedback_items || []
+  };
 };
 
 export const createGroup = async ({ name, hostUid, hostEmail, members }) => {
-  assertDb();
+  assertSupabase();
   const groupName = String(name || "").trim();
   if (!groupName) throw new Error("Group name is required");
 
@@ -37,145 +72,148 @@ export const createGroup = async ({ name, hostUid, hostEmail, members }) => {
   const emails = normalizedMembers.map((m) => m.emailLower);
   if (new Set(emails).size !== emails.length) throw new Error("Each member must have a unique email");
 
-  const groupRef = doc(collection(db, "groups"));
-
   const memberEmails = normalizedMembers.map((m) => m.emailLower);
-  await setDoc(groupRef, {
-    name: groupName,
-    hostUid,
-    hostEmailLower: normalizeEmail(hostEmail),
-    members: normalizedMembers.map(({ emailLower, name }) => ({ emailLower, name })),
-    memberEmails,
-    createdAt: serverTimestamp()
-  });
+  const membersForGroup = normalizedMembers.map(({ emailLower, name }) => ({ emailLower, name }));
 
-  const invitesCollection = collection(db, "invitations");
-  const createdInvites = [];
-  for (const invite of normalizedMembers) {
-    const inviteRef = doc(invitesCollection);
-    const inviteDoc = {
-      groupId: groupRef.id,
-      hostUid,
-      hostEmailLower: normalizeEmail(hostEmail),
-      emailLower: invite.emailLower,
-      name: invite.name,
-      tempPassword: invite.tempPassword,
-      redeemedByUid: null,
-      redeemedAt: null,
-      createdAt: serverTimestamp()
-    };
-    await setDoc(inviteRef, inviteDoc);
-    createdInvites.push({ id: inviteRef.id, ...inviteDoc });
-  }
+  const { data: groupRow, error: groupError } = await supabase
+    .from("groups")
+    .insert({
+      name: groupName,
+      host_uid: hostUid,
+      host_email_lower: normalizeEmail(hostEmail),
+      members: membersForGroup,
+      member_emails: memberEmails
+    })
+    .select("*")
+    .single();
+  throwIfError(groupError);
+
+  const invitesInsert = normalizedMembers.map((m) => ({
+    group_id: groupRow.id,
+    host_uid: hostUid,
+    host_email_lower: normalizeEmail(hostEmail),
+    email_lower: m.emailLower,
+    name: m.name,
+    temp_password: m.tempPassword,
+    redeemed_by_uid: null,
+    redeemed_at: null
+  }));
+
+  const { data: inviteRows, error: inviteError } = await supabase
+    .from("invitations")
+    .insert(invitesInsert)
+    .select("*");
+  throwIfError(inviteError);
 
   return {
-    group: {
-      id: groupRef.id,
-      name: groupName,
-      hostUid,
-      hostEmailLower: normalizeEmail(hostEmail),
-      members: normalizedMembers.map(({ emailLower, name }) => ({ emailLower, name })),
-      memberEmails
-    },
-    invitations: createdInvites
+    group: mapGroupRow(groupRow),
+    invitations: (inviteRows || []).map(mapInvitationRow)
   };
 };
 
 export const listHostedGroups = async ({ hostUid }) => {
-  assertDb();
-  const q = query(collection(db, "groups"), where("hostUid", "==", hostUid));
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  assertSupabase();
+  const { data, error } = await supabase.from("groups").select("*").eq("host_uid", hostUid);
+  throwIfError(error);
+  return (data || []).map(mapGroupRow);
 };
 
 export const listMemberGroups = async ({ emailLower }) => {
-  assertDb();
-  const q = query(collection(db, "groups"), where("memberEmails", "array-contains", normalizeEmail(emailLower)));
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  assertSupabase();
+  const normalized = normalizeEmail(emailLower);
+  const { data, error } = await supabase.from("groups").select("*").contains("member_emails", [normalized]);
+  throwIfError(error);
+  return (data || []).map(mapGroupRow);
 };
 
 export const listGroupInvitations = async ({ groupId }) => {
-  assertDb();
-  const q = query(collection(db, "invitations"), where("groupId", "==", groupId));
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  assertSupabase();
+  const { data, error } = await supabase.from("invitations").select("*").eq("group_id", groupId);
+  throwIfError(error);
+  return (data || []).map(mapInvitationRow);
 };
 
 export const listGroupResponses = async ({ groupId }) => {
-  assertDb();
-  const q = query(collection(db, "responses"), where("groupId", "==", groupId));
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  assertSupabase();
+  const { data, error } = await supabase.from("responses").select("*").eq("group_id", groupId);
+  throwIfError(error);
+  return (data || []).map(mapResponseRow);
 };
 
 export const submitGroupResponse = async ({ groupId, respondentUid, respondentEmailLower, feedbackItems }) => {
-  assertDb();
-  const responsesCollection = collection(db, "responses");
-  const docRef = await addDoc(responsesCollection, {
-    groupId,
-    respondentUid,
-    respondentEmailLower: normalizeEmail(respondentEmailLower),
-    submittedAt: serverTimestamp(),
-    feedbackItems
-  });
-  return docRef.id;
+  assertSupabase();
+  const { data, error } = await supabase
+    .from("responses")
+    .insert({
+      group_id: groupId,
+      respondent_uid: respondentUid,
+      respondent_email_lower: normalizeEmail(respondentEmailLower),
+      feedback_items: feedbackItems
+    })
+    .select("id")
+    .single();
+  throwIfError(error);
+  return data.id;
 };
 
 export const upsertUserProfile = async ({ uid, emailLower, firstName, role }) => {
-  assertDb();
-  const userRef = doc(db, "users", uid);
-  await setDoc(
-    userRef,
+  assertSupabase();
+  const { error } = await supabase.from("profiles").upsert(
     {
-      emailLower: normalizeEmail(emailLower),
-      firstName: String(firstName || "").trim(),
+      id: uid,
+      email_lower: normalizeEmail(emailLower),
+      first_name: String(firstName || "").trim(),
       role: role || "member",
-      updatedAt: serverTimestamp()
+      updated_at: new Date().toISOString()
     },
-    { merge: true }
+    { onConflict: "id" }
   );
+  throwIfError(error);
 };
 
 export const getUserProfile = async ({ uid }) => {
-  assertDb();
-  const snap = await getDoc(doc(db, "users", uid));
-  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+  assertSupabase();
+  const { data, error } = await supabase.from("profiles").select("*").eq("id", uid).maybeSingle();
+  throwIfError(error);
+  if (!data) return null;
+  return {
+    id: data.id,
+    emailLower: data.email_lower,
+    firstName: data.first_name,
+    role: data.role
+  };
 };
 
 export const redeemInvitationForUser = async ({ uid, emailLower, tempPassword }) => {
-  assertDb();
   const normalizedEmail = normalizeEmail(emailLower);
-  const q = query(collection(db, "invitations"), where("emailLower", "==", normalizedEmail));
-  const snap = await getDocs(q);
-  const match = snap.docs
-    .map((d) => ({ id: d.id, ...d.data() }))
-    .find((inv) => inv.tempPassword === tempPassword);
+  assertSupabase();
+  const { data: invite, error } = await supabase
+    .from("invitations")
+    .select("*")
+    .eq("email_lower", normalizedEmail)
+    .eq("temp_password", tempPassword)
+    .maybeSingle();
+  throwIfError(error);
 
-  if (!match) throw new Error("Invalid email or temporary password");
-  if (match.redeemedByUid && match.redeemedByUid !== uid) throw new Error("Invitation already redeemed");
+  if (!invite) throw new Error("Invalid email or temporary password");
+  if (invite.redeemed_by_uid && invite.redeemed_by_uid !== uid) throw new Error("Invitation already redeemed");
 
-  if (!match.redeemedByUid) {
-    await updateDoc(doc(db, "invitations", match.id), {
-      redeemedByUid: uid,
-      redeemedAt: serverTimestamp()
-    });
+  if (!invite.redeemed_by_uid) {
+    const { data: updated, error: updateError } = await supabase
+      .from("invitations")
+      .update({ redeemed_by_uid: uid, redeemed_at: new Date().toISOString() })
+      .eq("id", invite.id)
+      .select("*")
+      .single();
+    throwIfError(updateError);
+    return mapInvitationRow(updated);
   }
 
-  return match;
+  return mapInvitationRow(invite);
 };
 
 export const deleteGroupCascade = async ({ groupId }) => {
-  assertDb();
-  const batch = writeBatch(db);
-
-  batch.delete(doc(db, "groups", groupId));
-
-  const invitesSnap = await getDocs(query(collection(db, "invitations"), where("groupId", "==", groupId)));
-  invitesSnap.forEach((d) => batch.delete(d.ref));
-
-  const responsesSnap = await getDocs(query(collection(db, "responses"), where("groupId", "==", groupId)));
-  responsesSnap.forEach((d) => batch.delete(d.ref));
-
-  await batch.commit();
+  assertSupabase();
+  const { error } = await supabase.from("groups").delete().eq("id", groupId);
+  throwIfError(error);
 };

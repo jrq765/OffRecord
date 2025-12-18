@@ -2,7 +2,6 @@ import React, { useState, useEffect, createContext, useContext } from "react";
 import {
   Send,
   WifiOff,
-  Users,
   CheckCircle,
   ArrowLeft,
   Plus,
@@ -13,14 +12,6 @@ import {
   Check,
   Download
 } from "lucide-react";
-import {
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut as firebaseSignOut,
-  updateProfile
-} from "firebase/auth";
-import { auth, firebaseInitError } from "./firebase";
 import {
   createGroup,
   deleteGroupCascade,
@@ -33,6 +24,7 @@ import {
   submitGroupResponse,
   upsertUserProfile
 } from "./db";
+import { supabase, supabaseInitError } from "./supabase";
 
 // ============================================================================
 // CONTEXT & STATE MANAGEMENT
@@ -50,10 +42,10 @@ const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const setCurrentUser = ({ firebaseUser, role, firstName }) => {
-    const email = firebaseUser.email || "";
+  const setCurrentUser = ({ authUser, role, firstName }) => {
+    const email = authUser.email || "";
     setUser({
-      uid: firebaseUser.uid,
+      uid: authUser.id,
       email,
       emailLower: String(email).toLowerCase(),
       firstName: String(firstName || "").trim(),
@@ -62,13 +54,16 @@ const AuthProvider = ({ children }) => {
   };
 
   useEffect(() => {
-    if (firebaseInitError || !auth) {
+    if (supabaseInitError || !supabase) {
       setUser(null);
       setLoading(false);
       return;
     }
 
-    const unsub = onAuthStateChanged(auth, (authUser) => {
+    let cancelled = false;
+
+    const applySession = (session) => {
+      const authUser = session?.user;
       if (!authUser) {
         setUser(null);
         setLoading(false);
@@ -77,10 +72,10 @@ const AuthProvider = ({ children }) => {
 
       const email = authUser.email || "";
       const emailLower = String(email).toLowerCase();
-      const fallbackFirstName = authUser.displayName || (emailLower ? emailLower.split("@")[0] : "");
+      const fallbackFirstName = authUser.user_metadata?.first_name || (emailLower ? emailLower.split("@")[0] : "");
 
       setUser({
-        uid: authUser.uid,
+        uid: authUser.id,
         email,
         emailLower,
         firstName: fallbackFirstName,
@@ -91,20 +86,18 @@ const AuthProvider = ({ children }) => {
       const profileTimeoutMs = 2500;
       const profilePromise = (async () => {
         try {
-          return await getUserProfile({ uid: authUser.uid });
+          return await getUserProfile({ uid: authUser.id });
         } catch {
           return null;
         }
       })();
 
-      const timeoutPromise = new Promise((resolve) => {
-        setTimeout(() => resolve(null), profileTimeoutMs);
-      });
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), profileTimeoutMs));
 
       Promise.race([profilePromise, timeoutPromise]).then((profile) => {
-        if (!profile) return;
+        if (cancelled || !profile) return;
         setUser((prev) => {
-          if (!prev || prev.uid !== authUser.uid) return prev;
+          if (!prev || prev.uid !== authUser.id) return prev;
           return {
             ...prev,
             firstName: profile.firstName || prev.firstName,
@@ -112,24 +105,53 @@ const AuthProvider = ({ children }) => {
           };
         });
       });
+    };
+
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (cancelled) return;
+        applySession(data.session);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setUser(null);
+        setLoading(false);
+      });
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (cancelled) return;
+      applySession(session);
     });
 
-    return () => unsub();
+    return () => {
+      cancelled = true;
+      sub?.subscription?.unsubscribe();
+    };
   }, []);
 
   const signup = async (email, password, firstName) => {
     const emailLower = String(email || "").trim().toLowerCase();
     const displayName = String(firstName || "").trim();
     try {
-      const cred = await createUserWithEmailAndPassword(auth, emailLower, password);
-      await updateProfile(cred.user, { displayName });
-      await upsertUserProfile({ uid: cred.user.uid, emailLower, firstName: displayName, role: "host" });
-      setCurrentUser({ firebaseUser: cred.user, role: "host", firstName: displayName });
+      const { data, error } = await supabase.auth.signUp({
+        email: emailLower,
+        password,
+        options: { data: { first_name: displayName } }
+      });
+      if (error) throw error;
+      if (!data.session) {
+        throw new Error("Check your email to confirm your account, then sign in.");
+      }
+      await upsertUserProfile({ uid: data.session.user.id, emailLower, firstName: displayName, role: "host" });
+      setCurrentUser({ authUser: data.session.user, role: "host", firstName: displayName });
     } catch (err) {
-      if (err?.code === "auth/email-already-in-use") {
-        const cred = await signInWithEmailAndPassword(auth, emailLower, password);
-        await upsertUserProfile({ uid: cred.user.uid, emailLower, firstName: displayName, role: "host" });
-        setCurrentUser({ firebaseUser: cred.user, role: "host", firstName: displayName });
+      const message = String(err?.message || "");
+      if (message.toLowerCase().includes("already") || message.toLowerCase().includes("registered")) {
+        const { data, error } = await supabase.auth.signInWithPassword({ email: emailLower, password });
+        if (error) throw error;
+        await upsertUserProfile({ uid: data.user.id, emailLower, firstName: displayName, role: "host" });
+        setCurrentUser({ authUser: data.user, role: "host", firstName: displayName });
       } else {
         throw err;
       }
@@ -140,33 +162,36 @@ const AuthProvider = ({ children }) => {
     const emailLower = String(email || "").trim().toLowerCase();
     const password = String(tempPassword || "").trim();
 
-    let cred;
+    let sessionUser;
     try {
-      cred = await signInWithEmailAndPassword(auth, emailLower, password);
+      const { data, error } = await supabase.auth.signInWithPassword({ email: emailLower, password });
+      if (error) throw error;
+      sessionUser = data.user;
     } catch (err) {
-      if (err?.code === "auth/user-not-found") {
-        cred = await createUserWithEmailAndPassword(auth, emailLower, password);
-      } else if (err?.code === "auth/wrong-password") {
-        throw new Error("Invalid email or temporary password");
+      const msg = String(err?.message || "").toLowerCase();
+      if (msg.includes("invalid login credentials")) {
+        const { data, error } = await supabase.auth.signUp({ email: emailLower, password });
+        if (error) throw error;
+        if (!data.session) throw new Error("Check your email to confirm your account, then sign in.");
+        sessionUser = data.session.user;
       } else {
-        throw err;
+        throw new Error("Invalid email or temporary password");
       }
     }
 
     try {
-      const invite = await redeemInvitationForUser({ uid: cred.user.uid, emailLower, tempPassword: password });
-      await updateProfile(cred.user, { displayName: invite.name });
-      await upsertUserProfile({ uid: cred.user.uid, emailLower, firstName: invite.name, role: "member" });
-      setCurrentUser({ firebaseUser: cred.user, role: "member", firstName: invite.name });
+      const invite = await redeemInvitationForUser({ uid: sessionUser.id, emailLower, tempPassword: password });
+      await upsertUserProfile({ uid: sessionUser.id, emailLower, firstName: invite.name, role: "member" });
+      setCurrentUser({ authUser: sessionUser, role: "member", firstName: invite.name });
       return invite;
     } catch (err) {
-      await firebaseSignOut(auth);
+      await supabase.auth.signOut();
       throw err;
     }
   };
 
   const logout = () => {
-    return firebaseSignOut(auth);
+    return supabase.auth.signOut();
   };
 
   return (
@@ -581,7 +606,7 @@ const Dashboard = () => {
               <p className="text-gray-400 mb-6">
                 {loadingGroups
                   ? loadingSlow
-                    ? "Still fetching your groups… (this is usually a Firebase/Network issue)"
+                    ? "Still fetching your groups… (this is usually a network issue)"
                     : "Fetching your groups..."
                   : user.isHost
                     ? "Create your first feedback group to get started"
@@ -1783,20 +1808,20 @@ const App = () => {
 const AppContent = () => {
   const { user, loading } = useAuth();
 
-  if (firebaseInitError) {
+  if (supabaseInitError) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
         <Card className="w-full max-w-xl">
-          <h1 className="text-2xl font-bold text-white mb-2">Firebase not configured</h1>
+          <h1 className="text-2xl font-bold text-white mb-2">Supabase not configured</h1>
           <p className="text-gray-300 mb-4">
-            This deployment is missing required Firebase environment variables, so the app can’t start.
+            This deployment is missing required Supabase environment variables, so the app can’t start.
           </p>
           <div className="bg-gray-900/40 border border-gray-700 rounded-lg p-4 text-sm text-gray-200">
-            <div className="font-mono">{firebaseInitError.message}</div>
+            <div className="font-mono">{supabaseInitError.message}</div>
           </div>
           <p className="text-gray-400 text-sm mt-4">
-            Netlify → Site settings → Environment variables → add the `VITE_FIREBASE_*` values from your Firebase web
-            app config, then redeploy.
+            Netlify → Site settings → Environment variables → add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`,
+            then redeploy.
           </p>
         </Card>
       </div>
