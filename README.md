@@ -35,14 +35,20 @@ npm run dev
 
 ## Invite emails (optional, recommended)
 
-OffRecord can automatically email invite codes to members via a Netlify Function + Resend.
+OffRecord can automatically email invite codes to members via a Netlify Function.
 
 In Netlify → Site settings → Environment variables, set:
 
 - `SUPABASE_URL` (same as `VITE_SUPABASE_URL`, but server-side)
 - `SUPABASE_SERVICE_ROLE_KEY` (Supabase Project Settings → API → service_role key) **do not expose to client**
-- `RESEND_API_KEY` (from https://resend.com)
-- `OFFRECORD_FROM_EMAIL` (optional; defaults to `onboarding@resend.dev`)
+
+Then choose one email provider:
+
+- Gmail SMTP (free-ish): set `GMAIL_USER` + `GMAIL_APP_PASSWORD` (requires 2FA + Google “App Password”)
+- Resend: set `RESEND_API_KEY` (from https://resend.com)
+
+Optional:
+- `OFFRECORD_FROM_EMAIL` (defaults to `GMAIL_USER` for Gmail, or `onboarding@resend.dev` for Resend)
 
 ## If you see a white screen on Netlify
 

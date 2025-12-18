@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const nodemailer = require("nodemailer");
 
 const json = (statusCode, body) => {
   return {
@@ -14,6 +15,14 @@ const requireEnv = (key) => {
   const value = process.env[key];
   if (!value) throw new Error(`Missing env var: ${key}`);
   return value;
+};
+
+const getEmailProvider = () => {
+  const gmailUser = process.env.GMAIL_USER;
+  const gmailAppPassword = process.env.GMAIL_APP_PASSWORD;
+  if (gmailUser && gmailAppPassword) return "gmail";
+  if (process.env.RESEND_API_KEY) return "resend";
+  return "none";
 };
 
 const sendResendEmail = async ({ apiKey, from, to, subject, text, html }) => {
@@ -38,6 +47,24 @@ const sendResendEmail = async ({ apiKey, from, to, subject, text, html }) => {
   }
 };
 
+const sendGmailEmail = async ({ user, appPassword, from, to, subject, text, html }) => {
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user,
+      pass: appPassword
+    }
+  });
+
+  await transporter.sendMail({
+    from: from || user,
+    to,
+    subject,
+    text,
+    html
+  });
+};
+
 exports.handler = async (event) => {
   try {
     if (event.httpMethod !== "POST") return json(405, { error: "Method not allowed" });
@@ -51,8 +78,22 @@ exports.handler = async (event) => {
 
     const supabaseUrl = requireEnv("SUPABASE_URL");
     const supabaseServiceRoleKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
-    const resendApiKey = requireEnv("RESEND_API_KEY");
-    const from = process.env.OFFRECORD_FROM_EMAIL || "onboarding@resend.dev";
+    const provider = getEmailProvider();
+    if (provider === "none") {
+      return json(400, {
+        error:
+          "Email is not configured. Set either (GMAIL_USER + GMAIL_APP_PASSWORD) or RESEND_API_KEY in Netlify env vars."
+      });
+    }
+
+    const resendApiKey = provider === "resend" ? requireEnv("RESEND_API_KEY") : null;
+    const gmailUser = provider === "gmail" ? requireEnv("GMAIL_USER") : null;
+    const gmailAppPassword = provider === "gmail" ? requireEnv("GMAIL_APP_PASSWORD") : null;
+
+    const from =
+      process.env.OFFRECORD_FROM_EMAIL ||
+      (provider === "gmail" ? gmailUser : null) ||
+      "onboarding@resend.dev";
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey, {
       auth: { persistSession: false, autoRefreshToken: false }
@@ -128,7 +169,19 @@ exports.handler = async (event) => {
       `;
 
       try {
-        await sendResendEmail({ apiKey: resendApiKey, from, to, subject, text, html });
+        if (provider === "gmail") {
+          await sendGmailEmail({
+            user: gmailUser,
+            appPassword: gmailAppPassword,
+            from,
+            to,
+            subject,
+            text,
+            html
+          });
+        } else {
+          await sendResendEmail({ apiKey: resendApiKey, from, to, subject, text, html });
+        }
         sent += 1;
       } catch (err) {
         failures.push({ to, error: String(err?.message || err) });
@@ -140,4 +193,3 @@ exports.handler = async (event) => {
     return json(500, { error: String(err?.message || err) });
   }
 };
-
