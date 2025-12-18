@@ -1,6 +1,38 @@
 -- OffRecord (Supabase) patch
 -- Run this if you've already applied `supabase/schema.sql` and pulled a newer version of the repo.
 
+-- Ensure required tables exist (safe to re-run)
+create extension if not exists pgcrypto;
+
+create table if not exists public.submissions (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.groups (id) on delete cascade,
+  respondent_uid uuid not null references auth.users (id) on delete cascade,
+  submitted_at timestamptz not null default now(),
+  unique (group_id, respondent_uid)
+);
+
+create index if not exists submissions_group_id_idx on public.submissions (group_id);
+create index if not exists submissions_respondent_uid_idx on public.submissions (respondent_uid);
+
+create table if not exists public.feedback (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.groups (id) on delete cascade,
+  respondent_uid uuid not null references auth.users (id) on delete cascade,
+  recipient_email_lower text not null,
+  strengths text not null,
+  improvements text not null,
+  score integer not null,
+  submitted_at timestamptz not null default now()
+);
+
+create index if not exists feedback_group_id_idx on public.feedback (group_id);
+create index if not exists feedback_respondent_uid_idx on public.feedback (respondent_uid);
+create index if not exists feedback_recipient_email_lower_idx on public.feedback (recipient_email_lower);
+
+alter table public.submissions enable row level security;
+alter table public.feedback enable row level security;
+
 -- Allow invite re-use (latest session wins)
 create or replace function public.redeem_invitation(email_lower_input text, temp_password_input text)
 returns public.invitations
@@ -97,4 +129,3 @@ with check (
     )
   )
 );
-
