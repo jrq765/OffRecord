@@ -39,9 +39,16 @@ returns void
 language plpgsql
 as $$
 declare item jsonb;
+declare inserted_count integer;
 begin
   insert into public.submissions (group_id, respondent_uid)
-  values (group_id_input, auth.uid());
+  values (group_id_input, auth.uid())
+  on conflict (group_id, respondent_uid) do nothing;
+
+  get diagnostics inserted_count = row_count;
+  if inserted_count = 0 then
+    raise exception 'You have already submitted feedback for this group';
+  end if;
 
   for item in select * from jsonb_array_elements(items)
   loop
@@ -100,6 +107,26 @@ end;
 $$;
 
 grant execute on function public.redeem_invitation(text, text) to authenticated;
+
+-- Allow participants to read submission progress
+drop policy if exists "submissions_read_host_or_member" on public.submissions;
+create policy "submissions_read_host_or_member"
+on public.submissions for select
+to authenticated
+using (
+  exists (
+    select 1 from public.groups g
+    where g.id = submissions.group_id
+      and (
+        g.host_uid = auth.uid()
+        or exists (
+          select 1 from public.invitations i
+          where i.group_id = g.id
+            and i.redeemed_by_uid = auth.uid()
+        )
+      )
+  )
+);
 
 -- Let hosts submit feedback *only if* they are included in the group's members list.
 drop policy if exists "submissions_create_member" on public.submissions;

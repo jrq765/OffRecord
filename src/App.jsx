@@ -1901,7 +1901,12 @@ const SurveyScreen = ({ group, onComplete }) => {
         onComplete();
       }, 2000);
     } catch (err) {
-      alert(err?.message || "Failed to submit feedback");
+      const msg = String(err?.message || "");
+      if (msg.toLowerCase().includes("already submitted")) {
+        alert("You already submitted feedback for this group.");
+      } else {
+        alert(msg || "Failed to submit feedback");
+      }
     } finally {
       setSubmitting(false);
     }

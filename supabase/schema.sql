@@ -117,9 +117,16 @@ returns void
 language plpgsql
 as $$
 declare item jsonb;
+declare inserted_count integer;
 begin
   insert into public.submissions (group_id, respondent_uid)
-  values (group_id_input, auth.uid());
+  values (group_id_input, auth.uid())
+  on conflict (group_id, respondent_uid) do nothing;
+
+  get diagnostics inserted_count = row_count;
+  if inserted_count = 0 then
+    raise exception 'You have already submitted feedback for this group';
+  end if;
 
   for item in select * from jsonb_array_elements(items)
   loop
