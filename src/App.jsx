@@ -67,16 +67,17 @@ const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const setCurrentUser = ({ authUser, role, firstName, emailLowerOverride }) => {
-    const email = authUser.email || (emailLowerOverride ? String(emailLowerOverride) : "");
-    setUser({
-      uid: authUser.id,
-      email,
-      emailLower: emailLowerOverride ? String(emailLowerOverride).toLowerCase() : String(email).toLowerCase(),
-      firstName: String(firstName || "").trim(),
-      isHost: role === "host"
-    });
-  };
+	  const setCurrentUser = ({ authUser, role, firstName, emailLowerOverride }) => {
+	    const email = authUser.email || (emailLowerOverride ? String(emailLowerOverride) : "");
+	    setUser({
+	      uid: authUser.id,
+	      email,
+	      emailLower: emailLowerOverride ? String(emailLowerOverride).toLowerCase() : String(email).toLowerCase(),
+	      firstName: String(firstName || "").trim(),
+	      isHost: role === "host",
+	      isAnonymous: !authUser.email
+	    });
+	  };
 
   useEffect(() => {
     if (supabaseInitError || !supabase) {
@@ -102,13 +103,14 @@ const AuthProvider = ({ children }) => {
       const fallbackFirstName =
         authUser.user_metadata?.first_name || (emailLower ? emailLower.split("@")[0] : "Anonymous");
 
-      setUser({
-        uid: authUser.id,
-        email: authEmail || emailLower,
-        emailLower,
-        firstName: fallbackFirstName,
-        isHost: false
-      });
+	      setUser({
+	        uid: authUser.id,
+	        email: authEmail || emailLower,
+	        emailLower,
+	        firstName: fallbackFirstName,
+	        isHost: false,
+	        isAnonymous: !authEmail
+	      });
       setLoading(false);
 
       const profileTimeoutMs = 2500;
@@ -128,14 +130,15 @@ const AuthProvider = ({ children }) => {
         if (profile) {
           setUser((prev) => {
             if (!prev || prev.uid !== authUser.id) return prev;
-            return {
-              ...prev,
-              email: prev.email || profile.emailLower || prev.email,
-              emailLower: prev.emailLower || profile.emailLower || prev.emailLower,
-              firstName: profile.firstName || prev.firstName,
-              isHost: profile.role === "host"
-            };
-          });
+	            return {
+	              ...prev,
+	              email: prev.email || profile.emailLower || prev.email,
+	              emailLower: prev.emailLower || profile.emailLower || prev.emailLower,
+	              firstName: profile.firstName || prev.firstName,
+	              isHost: profile.role === "host",
+	              isAnonymous: !authUser.email
+	            };
+	          });
           return;
         }
 
@@ -153,17 +156,18 @@ const AuthProvider = ({ children }) => {
 
         void Promise.race([invitePromise, inviteTimeout]).then((identity) => {
           if (cancelled || !identity) return;
-          setUser((prev) => {
-            if (!prev || prev.uid !== authUser.id) return prev;
-            return {
-              ...prev,
-              email: prev.email || identity.emailLower,
-              emailLower: prev.emailLower || identity.emailLower,
-              firstName: identity.firstName || prev.firstName
-            };
-          });
-        });
-      });
+	          setUser((prev) => {
+	            if (!prev || prev.uid !== authUser.id) return prev;
+	            return {
+	              ...prev,
+	              email: prev.email || identity.emailLower,
+	              emailLower: prev.emailLower || identity.emailLower,
+	              firstName: identity.firstName || prev.firstName,
+	              isAnonymous: !authUser.email
+	            };
+	          });
+	        });
+	      });
     };
 
     supabase.auth
@@ -2274,7 +2278,108 @@ const AppContent = () => {
     );
   }
 
-  return user ? <Dashboard /> : <AuthScreen />;
+  if (!user) return <AuthScreen />;
+  if (!user.isHost && user.isAnonymous) return <CompleteInviteAccountScreen />;
+  return <Dashboard />;
 };
 
 export default App;
+
+const CompleteInviteAccountScreen = () => {
+  const { user, logout } = useAuth();
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const emailLower = user?.emailLower || "";
+
+  const handleSave = async () => {
+    setError("");
+    if (!emailLower) {
+      setError("Missing your email. Sign out and join again with your invite code.");
+      return;
+    }
+    if (!password || password.length < 8) {
+      setError("Password must be at least 8 characters");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords do not match");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const { error: updateError } = await supabase.auth.updateUser({
+        email: emailLower,
+        password,
+        data: { email_lower: emailLower }
+      });
+      if (updateError) {
+        const m = String(updateError.message || "").toLowerCase();
+        if (m.includes("already") || m.includes("registered")) {
+          throw new Error(
+            "That email already has an account. Sign out, then use “Join Group” → “Sign In” with your existing password."
+          );
+        }
+        if (m.includes("confirm")) {
+          throw new Error(
+            "Supabase email confirmations are enabled. Disable them in Supabase Auth, or confirm the email before continuing."
+          );
+        }
+        throw updateError;
+      }
+    } catch (err) {
+      setError(err?.message || "Failed to create account");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex items-center justify-center p-4">
+      <Card className="w-full max-w-md">
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-purple-600 rounded-full mb-4">
+            <AnonymousIcon className="w-8 h-8 text-white" />
+          </div>
+          <h1 className="text-2xl font-bold text-white mb-2">Finish Setup</h1>
+          <p className="text-gray-400 text-sm">
+            You joined with an invite code. Set a password so you can sign in again without the temporary password.
+          </p>
+        </div>
+
+        <div className="space-y-4">
+          <Input label="Email" value={emailLower} disabled />
+          <Input
+            label="New Password"
+            type="password"
+            placeholder="At least 8 characters"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <Input
+            label="Confirm Password"
+            type="password"
+            placeholder="Repeat password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+          />
+
+          {error && (
+            <div className="bg-red-900/30 border border-red-500 rounded-lg p-3 text-red-400 text-sm">{error}</div>
+          )}
+
+          <Button onClick={handleSave} className="w-full" disabled={saving}>
+            {saving ? "Saving..." : "Set Password"}
+          </Button>
+
+          <button type="button" className="w-full text-sm text-gray-400 hover:text-white transition" onClick={logout}>
+            Sign out
+          </button>
+        </div>
+      </Card>
+    </div>
+  );
+};
