@@ -51,9 +51,31 @@ const sendResendEmail = async ({ apiKey, from, to, subject, text, html }) => {
 
 const createGmailTransporter = ({ user, appPassword }) => {
   return nodemailer.createTransport({
-    service: "gmail",
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    pool: true,
+    maxConnections: 1,
+    maxMessages: 100,
     auth: { user, pass: appPassword }
   });
+};
+
+const runWithConcurrency = async ({ items, limit, handler }) => {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: Math.max(1, limit) }, async () => {
+    while (true) {
+      const i = nextIndex;
+      nextIndex += 1;
+      if (i >= items.length) break;
+      results[i] = await handler(items[i], i);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
 };
 
 exports.handler = async (event) => {
@@ -120,6 +142,8 @@ exports.handler = async (event) => {
     const origin = String(appUrl || "").trim() || (event.headers.origin ? String(event.headers.origin) : "");
     const signInUrl = origin ? `${origin}` : "your OffRecord site";
 
+    const start = Date.now();
+
     let sent = 0;
     const failures = [];
     const results = [];
@@ -129,9 +153,15 @@ exports.handler = async (event) => {
         ? createGmailTransporter({ user: gmailUser, appPassword: gmailAppPassword })
         : null;
 
-    for (const inv of invites || []) {
+    const inviteList = invites || [];
+    const concurrency = provider === "gmail" ? 1 : 4;
+
+    await runWithConcurrency({
+      items: inviteList,
+      limit: concurrency,
+      handler: async (inv) => {
       const to = String(inv.email_lower || "").trim();
-      if (!to) continue;
+      if (!to) return { to: "", ok: false, error: "Missing invite email" };
 
       const inviteeName = String(inv.name || "").trim() || "there";
       const tempPassword = String(inv.temp_password || "").trim();
@@ -184,19 +214,23 @@ exports.handler = async (event) => {
               rejected: Array.isArray(info?.rejected) ? info.rejected : []
             });
           }
+          return { to, ok: true, messageId: info?.messageId || null };
         } else {
           const info = await sendResendEmail({ apiKey: resendApiKey, from, to, subject, text, html });
           sent += 1;
           if (results.length < 20) {
             results.push({ to, ok: true, id: info?.id || null });
           }
+          return { to, ok: true, id: info?.id || null };
         }
       } catch (err) {
         const error = String(err?.message || err);
         failures.push({ to, error });
         if (results.length < 20) results.push({ to, ok: false, error });
+        return { to, ok: false, error };
       }
     }
+    });
 
     return json(200, {
       ok: true,
@@ -205,7 +239,8 @@ exports.handler = async (event) => {
       sent,
       failed: failures.length,
       failures,
-      results
+      results,
+      durationMs: Date.now() - start
     });
   } catch (err) {
     return json(500, { error: String(err?.message || err) });

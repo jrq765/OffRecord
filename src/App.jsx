@@ -1323,6 +1323,11 @@ const InvitationSuccess = ({ groupName, groupId, invitations, emailStatus, onClo
                   {emailStatus?.failed ? ` • ${emailStatus.failed} failed` : ""}
                 </p>
               )}
+              {!emailStatus?.sending && !emailStatus?.error && emailStatus?.provider === "gmail" && (
+                <p className="text-xs text-gray-400 mt-1">
+                  Gmail sometimes delays delivery by a few minutes; recipients should also check Spam/Promotions.
+                </p>
+              )}
             </div>
             {!emailStatus?.sending && (
               <Button
