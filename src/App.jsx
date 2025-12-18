@@ -68,32 +68,50 @@ const AuthProvider = ({ children }) => {
       return;
     }
 
-    const unsub = onAuthStateChanged(auth, async (authUser) => {
+    const unsub = onAuthStateChanged(auth, (authUser) => {
       if (!authUser) {
         setUser(null);
         setLoading(false);
         return;
       }
 
-      const emailLower = String(authUser.email || "").toLowerCase();
-      let profile = null;
-      try {
-        profile = await getUserProfile({ uid: authUser.uid });
-      } catch {
-        profile = null;
-      }
-      const firstName =
-        profile?.firstName || authUser.displayName || (emailLower ? emailLower.split("@")[0] : "");
-      const role = profile?.role || "member";
+      const email = authUser.email || "";
+      const emailLower = String(email).toLowerCase();
+      const fallbackFirstName = authUser.displayName || (emailLower ? emailLower.split("@")[0] : "");
 
       setUser({
         uid: authUser.uid,
-        email: authUser.email || "",
+        email,
         emailLower,
-        firstName,
-        isHost: role === "host"
+        firstName: fallbackFirstName,
+        isHost: false
       });
       setLoading(false);
+
+      const profileTimeoutMs = 2500;
+      const profilePromise = (async () => {
+        try {
+          return await getUserProfile({ uid: authUser.uid });
+        } catch {
+          return null;
+        }
+      })();
+
+      const timeoutPromise = new Promise((resolve) => {
+        setTimeout(() => resolve(null), profileTimeoutMs);
+      });
+
+      Promise.race([profilePromise, timeoutPromise]).then((profile) => {
+        if (!profile) return;
+        setUser((prev) => {
+          if (!prev || prev.uid !== authUser.uid) return prev;
+          return {
+            ...prev,
+            firstName: profile.firstName || prev.firstName,
+            isHost: profile.role === "host"
+          };
+        });
+      });
     });
 
     return () => unsub();

@@ -1,6 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { initializeFirestore } from "firebase/firestore";
 
 const requiredKeys = [
   "VITE_FIREBASE_API_KEY",
@@ -30,4 +30,6 @@ export const firebaseApp = firebaseInitError
     });
 
 export const auth = firebaseApp ? getAuth(firebaseApp) : null;
-export const db = firebaseApp ? getFirestore(firebaseApp) : null;
+export const db = firebaseApp
+  ? initializeFirestore(firebaseApp, { experimentalAutoDetectLongPolling: true })
+  : null;
