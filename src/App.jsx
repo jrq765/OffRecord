@@ -428,16 +428,49 @@ const Dashboard = () => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [loadingGroups, setLoadingGroups] = useState(true);
   const [groupsError, setGroupsError] = useState("");
+  const [loadingSlow, setLoadingSlow] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const withTimeout = (promise, ms) => {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out loading groups")), ms))
+    ]);
+  };
 
   useEffect(() => {
     const load = async () => {
       setGroupsError("");
       setLoadingGroups(true);
+      setLoadingSlow(false);
       try {
-        const result = user.isHost
-          ? await listHostedGroups({ hostUid: user.uid })
-          : await listMemberGroups({ emailLower: user.emailLower });
-        setGroups(result);
+        const slowTimer = setTimeout(() => setLoadingSlow(true), 2500);
+        const timeoutMs = 15000;
+
+        const hostedPromise = withTimeout(listHostedGroups({ hostUid: user.uid }), timeoutMs);
+        const memberPromise = user.emailLower
+          ? withTimeout(listMemberGroups({ emailLower: user.emailLower }), timeoutMs)
+          : Promise.resolve([]);
+
+        const [hostedRes, memberRes] = await Promise.allSettled([hostedPromise, memberPromise]);
+        clearTimeout(slowTimer);
+
+        const merged = [];
+        const seen = new Set();
+        for (const res of [hostedRes, memberRes]) {
+          if (res.status !== "fulfilled") continue;
+          for (const g of res.value || []) {
+            if (seen.has(g.id)) continue;
+            seen.add(g.id);
+            merged.push(g);
+          }
+        }
+
+        if (merged.length === 0 && hostedRes.status === "rejected" && memberRes.status === "rejected") {
+          throw hostedRes.reason || memberRes.reason || new Error("Failed to load groups");
+        }
+
+        setGroups(merged);
       } catch (err) {
         setGroupsError(err?.message || "Failed to load groups");
       } finally {
@@ -446,20 +479,46 @@ const Dashboard = () => {
     };
 
     void load();
-  }, [user.emailLower, user.isHost, user.uid]);
+  }, [user.emailLower, user.uid]);
 
   const refreshGroups = async () => {
     setGroupsError("");
     setLoadingGroups(true);
+    setLoadingSlow(false);
+    setRefreshing(true);
     try {
-      const result = user.isHost
-        ? await listHostedGroups({ hostUid: user.uid })
-        : await listMemberGroups({ emailLower: user.emailLower });
-      setGroups(result);
+      const slowTimer = setTimeout(() => setLoadingSlow(true), 2500);
+      const timeoutMs = 15000;
+
+      const hostedPromise = withTimeout(listHostedGroups({ hostUid: user.uid }), timeoutMs);
+      const memberPromise = user.emailLower
+        ? withTimeout(listMemberGroups({ emailLower: user.emailLower }), timeoutMs)
+        : Promise.resolve([]);
+
+      const [hostedRes, memberRes] = await Promise.allSettled([hostedPromise, memberPromise]);
+      clearTimeout(slowTimer);
+
+      const merged = [];
+      const seen = new Set();
+      for (const res of [hostedRes, memberRes]) {
+        if (res.status !== "fulfilled") continue;
+        for (const g of res.value || []) {
+          if (seen.has(g.id)) continue;
+          seen.add(g.id);
+          merged.push(g);
+        }
+      }
+
+      if (merged.length === 0 && hostedRes.status === "rejected" && memberRes.status === "rejected") {
+        throw hostedRes.reason || memberRes.reason || new Error("Failed to load groups");
+      }
+
+      setGroups(merged);
     } catch (err) {
       setGroupsError(err?.message || "Failed to load groups");
     } finally {
       setLoadingGroups(false);
+      setRefreshing(false);
     }
   };
 
@@ -497,12 +556,17 @@ const Dashboard = () => {
               {user.isHost ? "Create groups and invite members" : "Complete surveys to give feedback"}
             </p>
           </div>
-          {user.isHost && (
-            <Button onClick={() => setShowCreateModal(true)}>
-              <Plus className="w-5 h-5" />
-              New Group
+          <div className="flex items-center gap-3">
+            <Button variant="secondary" onClick={refreshGroups} disabled={loadingGroups}>
+              {refreshing ? "Refreshing..." : "Refresh"}
             </Button>
-          )}
+            {user.isHost && (
+              <Button onClick={() => setShowCreateModal(true)} disabled={loadingGroups}>
+                <Plus className="w-5 h-5" />
+                New Group
+              </Button>
+            )}
+          </div>
         </div>
 
         {groups.length === 0 ? (
@@ -516,7 +580,9 @@ const Dashboard = () => {
             ) : (
               <p className="text-gray-400 mb-6">
                 {loadingGroups
-                  ? "Fetching your groups..."
+                  ? loadingSlow
+                    ? "Still fetching your groups… (this is usually a Firebase/Network issue)"
+                    : "Fetching your groups..."
                   : user.isHost
                     ? "Create your first feedback group to get started"
                     : "Wait for a group host to invite you"}
