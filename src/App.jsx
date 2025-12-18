@@ -191,11 +191,12 @@ const AuthProvider = ({ children }) => {
 
   const signup = async (email, password, firstName) => {
     const emailLower = String(email || "").trim().toLowerCase();
+    const cleanPassword = String(password || "");
     const displayName = String(firstName || "").trim();
     try {
       const { data, error } = await supabase.auth.signUp({
         email: emailLower,
-        password,
+        password: cleanPassword,
         options: { data: { first_name: displayName } }
       });
       if (error) {
@@ -205,14 +206,31 @@ const AuthProvider = ({ children }) => {
         }
         throw error;
       }
-      if (!data.session) throw new Error("Disable email confirmation in Supabase Auth, then try again.");
+      if (!data.session) {
+        throw new Error(
+          "Email confirmations are enabled. Disable them in Supabase Auth, or confirm the email then sign in."
+        );
+      }
       await upsertUserProfile({ uid: data.session.user.id, emailLower, firstName: displayName, role: "host" });
       setCurrentUser({ authUser: data.session.user, role: "host", firstName: displayName });
     } catch (err) {
       const message = String(err?.message || "");
       if (message.toLowerCase().includes("already") || message.toLowerCase().includes("registered")) {
-        const { data, error } = await supabase.auth.signInWithPassword({ email: emailLower, password });
-        if (error) throw error;
+        const { data, error } = await supabase.auth.signInWithPassword({ email: emailLower, password: cleanPassword });
+        if (error) {
+          const m = String(error.message || "").toLowerCase();
+          if (m.includes("invalid login credentials")) {
+            throw new Error(
+              "That email already has an account. Use “Join Group” → “Sign In” with the original password (or reset/delete the user in Supabase Auth)."
+            );
+          }
+          if (m.includes("confirm") || m.includes("confirmed")) {
+            throw new Error(
+              "That email exists but isn’t confirmed. Confirm (or delete) the user in Supabase Auth → Users, then try again."
+            );
+          }
+          throw error;
+        }
         await upsertUserProfile({ uid: data.user.id, emailLower, firstName: displayName, role: "host" });
         setCurrentUser({ authUser: data.user, role: "host", firstName: displayName });
       } else {
