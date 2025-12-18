@@ -42,15 +42,27 @@ const mapInvitationRow = (row) => {
   };
 };
 
-const mapResponseRow = (row) => {
+const mapSubmissionRow = (row) => {
   if (!row) return null;
   return {
     id: row.id,
     groupId: row.group_id,
     respondentUid: row.respondent_uid,
-    respondentEmailLower: row.respondent_email_lower,
-    submittedAt: row.submitted_at,
-    feedbackItems: Array.isArray(row.feedback_items) ? row.feedback_items : row.feedback_items || []
+    submittedAt: row.submitted_at
+  };
+};
+
+const mapFeedbackRow = (row) => {
+  if (!row) return null;
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    respondentUid: row.respondent_uid,
+    recipientEmailLower: row.recipient_email_lower,
+    strengths: row.strengths,
+    improvements: row.improvements,
+    score: row.score,
+    submittedAt: row.submitted_at
   };
 };
 
@@ -118,9 +130,21 @@ export const listHostedGroups = async ({ hostUid }) => {
   return (data || []).map(mapGroupRow);
 };
 
-export const listMemberGroups = async ({ emailLower }) => {
+export const listMemberGroups = async ({ uid, emailLower }) => {
   assertSupabase();
   const normalized = normalizeEmail(emailLower);
+
+  // Prefer "redeemed invitation" membership; fall back to array membership for legacy/host use.
+  const { data: inviteRows, error: inviteError } = await supabase
+    .from("invitations")
+    .select("group:groups(*)")
+    .eq("redeemed_by_uid", uid);
+  throwIfError(inviteError);
+
+  const groupsFromInvites = (inviteRows || []).map((r) => r.group).filter(Boolean).map(mapGroupRow);
+
+  if (groupsFromInvites.length > 0) return groupsFromInvites;
+
   const { data, error } = await supabase.from("groups").select("*").contains("member_emails", [normalized]);
   throwIfError(error);
   return (data || []).map(mapGroupRow);
@@ -135,25 +159,18 @@ export const listGroupInvitations = async ({ groupId }) => {
 
 export const listGroupResponses = async ({ groupId }) => {
   assertSupabase();
-  const { data, error } = await supabase.from("responses").select("*").eq("group_id", groupId);
+  const { data, error } = await supabase.from("submissions").select("*").eq("group_id", groupId);
   throwIfError(error);
-  return (data || []).map(mapResponseRow);
+  return (data || []).map(mapSubmissionRow);
 };
 
 export const submitGroupResponse = async ({ groupId, respondentUid, respondentEmailLower, feedbackItems }) => {
   assertSupabase();
-  const { data, error } = await supabase
-    .from("responses")
-    .insert({
-      group_id: groupId,
-      respondent_uid: respondentUid,
-      respondent_email_lower: normalizeEmail(respondentEmailLower),
-      feedback_items: feedbackItems
-    })
-    .select("id")
-    .single();
+  void respondentUid;
+  void respondentEmailLower;
+  const { error } = await supabase.rpc("submit_feedback", { group_id_input: groupId, items: feedbackItems });
   throwIfError(error);
-  return data.id;
+  return true;
 };
 
 export const upsertUserProfile = async ({ uid, emailLower, firstName, role }) => {
@@ -187,33 +204,29 @@ export const getUserProfile = async ({ uid }) => {
 export const redeemInvitationForUser = async ({ uid, emailLower, tempPassword }) => {
   const normalizedEmail = normalizeEmail(emailLower);
   assertSupabase();
-  const { data: invite, error } = await supabase
-    .from("invitations")
-    .select("*")
-    .eq("email_lower", normalizedEmail)
-    .eq("temp_password", tempPassword)
-    .maybeSingle();
+  void uid;
+  const { data, error } = await supabase.rpc("redeem_invitation", {
+    email_lower_input: normalizedEmail,
+    temp_password_input: tempPassword
+  });
   throwIfError(error);
-
-  if (!invite) throw new Error("Invalid email or temporary password");
-  if (invite.redeemed_by_uid && invite.redeemed_by_uid !== uid) throw new Error("Invitation already redeemed");
-
-  if (!invite.redeemed_by_uid) {
-    const { data: updated, error: updateError } = await supabase
-      .from("invitations")
-      .update({ redeemed_by_uid: uid, redeemed_at: new Date().toISOString() })
-      .eq("id", invite.id)
-      .select("*")
-      .single();
-    throwIfError(updateError);
-    return mapInvitationRow(updated);
-  }
-
-  return mapInvitationRow(invite);
+  return mapInvitationRow(data);
 };
 
 export const deleteGroupCascade = async ({ groupId }) => {
   assertSupabase();
   const { error } = await supabase.from("groups").delete().eq("id", groupId);
   throwIfError(error);
+};
+
+export const listGroupFeedbackForRecipient = async ({ groupId, recipientEmailLower }) => {
+  assertSupabase();
+  const normalized = normalizeEmail(recipientEmailLower);
+  const { data, error } = await supabase
+    .from("feedback")
+    .select("*")
+    .eq("group_id", groupId)
+    .eq("recipient_email_lower", normalized);
+  throwIfError(error);
+  return (data || []).map(mapFeedbackRow);
 };

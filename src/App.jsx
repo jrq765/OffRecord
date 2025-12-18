@@ -1,7 +1,6 @@
 import React, { useState, useEffect, createContext, useContext } from "react";
 import {
   Send,
-  WifiOff,
   CheckCircle,
   ArrowLeft,
   Plus,
@@ -17,6 +16,7 @@ import {
   deleteGroupCascade,
   getUserProfile,
   listGroupInvitations,
+  listGroupFeedbackForRecipient,
   listGroupResponses,
   listHostedGroups,
   listMemberGroups,
@@ -25,6 +25,27 @@ import {
   upsertUserProfile
 } from "./db";
 import { supabase, supabaseInitError } from "./supabase";
+
+const AnonymousIcon = ({ className = "" }) => {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="9" r="4" stroke="currentColor" strokeWidth="2" />
+      <path
+        d="M4 21c1.6-4 5-6 8-6s6.4 2 8 6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <rect x="7" y="8" width="10" height="3" rx="1.25" fill="currentColor" />
+    </svg>
+  );
+};
 
 // ============================================================================
 // CONTEXT & STATE MANAGEMENT
@@ -42,12 +63,12 @@ const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const setCurrentUser = ({ authUser, role, firstName }) => {
-    const email = authUser.email || "";
+  const setCurrentUser = ({ authUser, role, firstName, emailLowerOverride }) => {
+    const email = authUser.email || (emailLowerOverride ? String(emailLowerOverride) : "");
     setUser({
       uid: authUser.id,
       email,
-      emailLower: String(email).toLowerCase(),
+      emailLower: emailLowerOverride ? String(emailLowerOverride).toLowerCase() : String(email).toLowerCase(),
       firstName: String(firstName || "").trim(),
       isHost: role === "host"
     });
@@ -100,6 +121,8 @@ const AuthProvider = ({ children }) => {
           if (!prev || prev.uid !== authUser.id) return prev;
           return {
             ...prev,
+            email: prev.email || profile.emailLower || prev.email,
+            emailLower: prev.emailLower || profile.emailLower || prev.emailLower,
             firstName: profile.firstName || prev.firstName,
             isHost: profile.role === "host"
           };
@@ -162,33 +185,32 @@ const AuthProvider = ({ children }) => {
     const emailLower = String(email || "").trim().toLowerCase();
     const password = String(tempPassword || "").trim();
 
-    let sessionUser;
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email: emailLower, password });
-      if (error) throw error;
-      sessionUser = data.user;
-    } catch (err) {
-      const msg = String(err?.message || "").toLowerCase();
-      if (msg.includes("invalid login credentials")) {
-        const { data, error } = await supabase.auth.signUp({ email: emailLower, password });
-        if (error) {
-          const m = String(error.message || "").toLowerCase();
-          if (m.includes("already") || m.includes("registered")) {
-            throw new Error("Invalid email or temporary password");
-          }
-          throw error;
-        }
-        if (!data.session) throw new Error("Check your email to confirm your account, then sign in.");
-        sessionUser = data.session.user;
-      } else {
-        throw new Error("Invalid email or temporary password");
-      }
-    }
+      let authUser;
+      try {
+        const { data, error } = await supabase.auth.signInWithPassword({ email: emailLower, password });
+        if (error) throw error;
+        authUser = data.user;
+      } catch (err) {
+        const msg = String(err?.message || "").toLowerCase();
+        if (!msg.includes("invalid login credentials")) throw err;
 
-    try {
-      const invite = await redeemInvitationForUser({ uid: sessionUser.id, emailLower, tempPassword: password });
-      await upsertUserProfile({ uid: sessionUser.id, emailLower, firstName: invite.name, role: "member" });
-      setCurrentUser({ authUser: sessionUser, role: "member", firstName: invite.name });
+        const { data, error } = await supabase.auth.signUp({ email: emailLower, password });
+        if (error) throw error;
+        if (!data.session?.user) {
+          throw new Error("Email confirmation is enabled. Disable it in Supabase Auth settings, then try again.");
+        }
+        authUser = data.session.user;
+      }
+
+      const invite = await redeemInvitationForUser({ uid: authUser.id, emailLower, tempPassword: password });
+      await upsertUserProfile({
+        uid: authUser.id,
+        emailLower: invite.emailLower,
+        firstName: invite.name,
+        role: "member"
+      });
+      setCurrentUser({ authUser, role: "member", firstName: invite.name, emailLowerOverride: invite.emailLower });
       return invite;
     } catch (err) {
       await supabase.auth.signOut();
@@ -341,7 +363,7 @@ const AuthScreen = () => {
       <Card className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-purple-600 rounded-full mb-4">
-            <WifiOff className="w-8 h-8 text-white" />
+            <AnonymousIcon className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">OffRecord</h1>
           <p className="text-gray-400">Anonymous peer feedback for growth</p>
@@ -440,7 +462,7 @@ const AuthScreen = () => {
             </Button>
 
             <p className="text-sm text-gray-400 text-center">
-              Check your email for your temporary password
+              No account needed — use the invite credentials from your host
             </p>
           </div>
         )}
@@ -480,7 +502,7 @@ const Dashboard = () => {
 
         const hostedPromise = withTimeout(listHostedGroups({ hostUid: user.uid }), timeoutMs);
         const memberPromise = user.emailLower
-          ? withTimeout(listMemberGroups({ emailLower: user.emailLower }), timeoutMs)
+          ? withTimeout(listMemberGroups({ uid: user.uid, emailLower: user.emailLower }), timeoutMs)
           : Promise.resolve([]);
 
         const [hostedRes, memberRes] = await Promise.allSettled([hostedPromise, memberPromise]);
@@ -523,7 +545,7 @@ const Dashboard = () => {
 
       const hostedPromise = withTimeout(listHostedGroups({ hostUid: user.uid }), timeoutMs);
       const memberPromise = user.emailLower
-        ? withTimeout(listMemberGroups({ emailLower: user.emailLower }), timeoutMs)
+        ? withTimeout(listMemberGroups({ uid: user.uid, emailLower: user.emailLower }), timeoutMs)
         : Promise.resolve([]);
 
       const [hostedRes, memberRes] = await Promise.allSettled([hostedPromise, memberPromise]);
@@ -559,7 +581,7 @@ const Dashboard = () => {
         <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-purple-600 rounded-full flex items-center justify-center">
-              <WifiOff className="w-5 h-5 text-white" />
+              <AnonymousIcon className="w-5 h-5 text-white" />
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">OffRecord</h1>
@@ -602,7 +624,7 @@ const Dashboard = () => {
 
         {groups.length === 0 ? (
           <Card className="text-center py-12">
-            <WifiOff className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+            <AnonymousIcon className="w-16 h-16 text-gray-600 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-white mb-2">
               {loadingGroups ? "Loading..." : user.isHost ? "No groups yet" : "No invitations yet"}
             </h3>
@@ -666,7 +688,7 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
   const [status, setStatus] = useState({
     loading: true,
     completed: 0,
-    total: group.memberEmails?.length || group.members?.length || 0,
+    total: group.members?.length || 0,
     userHasSubmitted: false,
     userIsParticipant: false,
     isComplete: false
@@ -677,19 +699,14 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
 
     const loadStatus = async () => {
       try {
-        const responses = await listGroupResponses({ groupId: group.id });
-        const participantEmails = Array.isArray(group.memberEmails)
-          ? group.memberEmails
-          : (group.members || []).map((m) => (m.emailLower || m.email || "").toLowerCase());
+        const submissions = await listGroupResponses({ groupId: group.id });
+        const respondents = new Set((submissions || []).map((s) => s.respondentUid).filter(Boolean));
 
-        const participantSet = new Set(participantEmails.filter(Boolean));
-        const respondentEmails = responses.map((r) => String(r.respondentEmailLower || "").toLowerCase()).filter(Boolean);
-        const respondentsInParticipants = new Set(respondentEmails.filter((e) => participantSet.has(e)));
-
-        const completed = respondentsInParticipants.size;
-        const total = participantSet.size;
-        const userIsParticipant = participantSet.has(user.emailLower);
-        const userHasSubmitted = respondentsInParticipants.has(user.emailLower);
+        const members = group.members || [];
+        const total = members.length;
+        const completed = respondents.size;
+        const userIsParticipant = members.some((m) => String(m.emailLower || "").toLowerCase() === user.emailLower);
+        const userHasSubmitted = respondents.has(user.uid);
 
         if (!cancelled) {
           setStatus({
@@ -722,18 +739,20 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
         </div>
       );
     }
-    if (!status.userIsParticipant) {
-      return (
-        <div className="text-gray-400">
-          <span className="text-sm font-medium">Organizer</span>
-        </div>
-      );
-    }
     if (status.isComplete) {
       return (
         <div className="flex items-center gap-2 text-green-400">
           <CheckCircle className="w-5 h-5" />
           <span className="text-sm font-medium">Completed</span>
+        </div>
+      );
+    }
+    if (!status.userIsParticipant) {
+      return (
+        <div className="text-gray-400">
+          <span className="text-sm font-medium">
+            Collecting feedback ({status.completed}/{status.total})
+          </span>
         </div>
       );
     }
@@ -755,6 +774,13 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
 
   const getActionButton = () => {
     if (status.isComplete) {
+      if (!status.userIsParticipant) {
+        return (
+          <Button variant="ghost" disabled>
+            All feedback collected
+          </Button>
+        );
+      }
       return (
         <Button onClick={() => setShowPDFModal(true)}>
           <Download className="w-5 h-5" />
@@ -772,7 +798,7 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
     if (!status.userIsParticipant) {
       return (
         <Button variant="ghost" disabled>
-          Not a participant
+          Waiting for responses
         </Button>
       );
     }
@@ -1025,7 +1051,9 @@ const CreateGroupModal = ({ hostUid, hostEmail, onClose, onCreated }) => {
                 </button>
               )}
 
-              <p className="mt-4 text-sm text-gray-400">💡 3-6 people work best. Members will receive temporary passwords via email.</p>
+              <p className="mt-4 text-sm text-gray-400">
+                💡 3-6 people work best. You'll copy/share invite credentials after creating the group.
+              </p>
             </div>
 
             {error && (
@@ -1141,26 +1169,19 @@ const FeedbackPDFModal = ({ group, userEmail, userName, onClose }) => {
   useEffect(() => {
     let cancelled = false;
 
-    const loadFeedback = async () => {
-      setLoadingFeedback(true);
-      try {
-        const allResponses = await listGroupResponses({ groupId: group.id });
-        const myFeedback = [];
-
-        allResponses.forEach((response) => {
-          const items = Array.isArray(response.feedbackItems) ? response.feedbackItems : [];
-          const feedbackForMe = items.find(
-            (item) => String(item.memberEmail || "").toLowerCase() === String(userEmail || "").toLowerCase()
-          );
-          if (feedbackForMe) myFeedback.push(feedbackForMe);
-        });
-
-        const shuffled = [...myFeedback].sort(() => Math.random() - 0.5);
-        if (!cancelled) setShuffledFeedback(shuffled);
-      } finally {
-        if (!cancelled) setLoadingFeedback(false);
-      }
-    };
+	    const loadFeedback = async () => {
+	      setLoadingFeedback(true);
+	      try {
+	        const feedback = await listGroupFeedbackForRecipient({
+	          groupId: group.id,
+	          recipientEmailLower: userEmail
+	        });
+	        const shuffled = [...feedback].sort(() => Math.random() - 0.5);
+	        if (!cancelled) setShuffledFeedback(shuffled);
+	      } finally {
+	        if (!cancelled) setLoadingFeedback(false);
+	      }
+	    };
 
     void loadFeedback();
     return () => {
@@ -1591,10 +1612,13 @@ const InvitationModal = ({ group, onClose }) => {
 const SurveyScreen = ({ group, onComplete }) => {
   const { user } = useAuth();
   const [currentMemberIdx, setCurrentMemberIdx] = useState(0);
-  const [responses, setResponses] = useState(
-    group.members.map((m) => ({
-      memberName: m.name,
-      memberEmail: String(m.emailLower || m.email || "").toLowerCase(),
+  const recipients = (group.members || []).filter(
+    (m) => String(m.emailLower || "").toLowerCase() !== user.emailLower
+  );
+  const [responses, setResponses] = useState(() =>
+    recipients.map((m) => ({
+      recipientName: m.name,
+      recipientEmailLower: String(m.emailLower || "").toLowerCase(),
       strengths: "",
       improvements: "",
       score: 0
@@ -1603,11 +1627,11 @@ const SurveyScreen = ({ group, onComplete }) => {
   const [showSuccess, setShowSuccess] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  const totalPoints = group.members.length * 100;
+  const totalPoints = recipients.length * 100;
   const allocatedPoints = responses.reduce((sum, r) => sum + r.score, 0);
   const remainingPoints = totalPoints - allocatedPoints;
 
-  const currentMember = group.members[currentMemberIdx];
+  const currentMember = recipients[currentMemberIdx];
   const currentResponse = responses[currentMemberIdx];
 
   const updateResponse = (field, value) => {
@@ -1621,7 +1645,7 @@ const SurveyScreen = ({ group, onComplete }) => {
   };
 
   const handleNext = () => {
-    if (currentMemberIdx < group.members.length - 1) {
+    if (currentMemberIdx < recipients.length - 1) {
       setCurrentMemberIdx(currentMemberIdx + 1);
     }
   };
@@ -1633,6 +1657,10 @@ const SurveyScreen = ({ group, onComplete }) => {
   };
 
   const handleSubmit = async () => {
+    if (!user.emailLower) {
+      alert("Missing your email. Please sign in again using your invite code.");
+      return;
+    }
     if (remainingPoints !== 0) {
       alert(`You must allocate exactly ${totalPoints} points. You have ${remainingPoints} points remaining.`);
       return;
@@ -1648,17 +1676,9 @@ const SurveyScreen = ({ group, onComplete }) => {
       });
 
       const groupResponses = await listGroupResponses({ groupId: group.id });
-      const participantEmails = Array.isArray(group.memberEmails)
-        ? group.memberEmails
-        : (group.members || []).map((m) => String(m.emailLower || m.email || "").toLowerCase());
-
-      const participantSet = new Set(participantEmails.filter(Boolean));
-      const respondentEmails = groupResponses
-        .map((r) => String(r.respondentEmailLower || "").toLowerCase())
-        .filter(Boolean);
-      const respondentsInParticipants = new Set(respondentEmails.filter((e) => participantSet.has(e)));
-
-      const allComplete = participantSet.size > 0 && respondentsInParticipants.size === participantSet.size;
+      const respondents = new Set((groupResponses || []).map((r) => r.respondentUid).filter(Boolean));
+      const totalParticipants = (group.members || []).length;
+      const allComplete = totalParticipants > 0 && respondents.size === totalParticipants;
 
       setShowSuccess(true);
 
@@ -1700,13 +1720,13 @@ const SurveyScreen = ({ group, onComplete }) => {
             <span>Back</span>
           </button>
           <div className="text-gray-400 text-sm">
-            {currentMemberIdx + 1} / {group.members.length}
+            {currentMemberIdx + 1} / {recipients.length}
           </div>
         </div>
 
         <div className="mb-8">
           <div className="flex gap-2">
-            {group.members.map((_, idx) => (
+            {recipients.map((_, idx) => (
               <div
                 key={idx}
                 className={`h-1 flex-1 rounded-full transition-all ${idx <= currentMemberIdx ? "bg-purple-600" : "bg-gray-700"}`}
@@ -1778,7 +1798,7 @@ const SurveyScreen = ({ group, onComplete }) => {
               </Button>
             )}
 
-            {currentMemberIdx < group.members.length - 1 ? (
+            {currentMemberIdx < recipients.length - 1 ? (
               <Button onClick={handleNext} disabled={!canProceed()} className="flex-1">
                 Continue
               </Button>
