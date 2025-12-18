@@ -108,6 +108,17 @@ $$;
 
 grant execute on function public.redeem_invitation(text, text) to authenticated;
 
+-- Allow invite members to read their own invitation rows (works with anonymous auth)
+alter table public.invitations enable row level security;
+drop policy if exists "invites_read_host_or_invitee" on public.invitations;
+create policy "invites_read_host_or_invitee"
+on public.invitations for select
+to authenticated
+using (
+  host_uid = auth.uid()
+  or redeemed_by_uid = auth.uid()
+);
+
 -- Allow invite members to read their groups (works with anonymous auth: no email claim needed)
 alter table public.groups enable row level security;
 drop policy if exists "groups_read_host_or_member" on public.groups;
