@@ -219,10 +219,48 @@ export const redeemInvitationForUser = async ({ uid, emailLower, tempPassword })
   return mapInvitationRow(data);
 };
 
+export const getMemberIdentityFromInvites = async ({ uid }) => {
+  assertSupabase();
+  const { data, error } = await supabase
+    .from("invitations")
+    .select("email_lower,name,redeemed_at")
+    .eq("redeemed_by_uid", uid)
+    .order("redeemed_at", { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+  throwIfError(error);
+  if (!data) return null;
+  return {
+    emailLower: data.email_lower,
+    firstName: data.name
+  };
+};
+
 export const deleteGroupCascade = async ({ groupId }) => {
   assertSupabase();
   const { error } = await supabase.from("groups").delete().eq("id", groupId);
   throwIfError(error);
+};
+
+export const updateGroupMembers = async ({ groupId, members }) => {
+  assertSupabase();
+  const normalizedMembers = (members || [])
+    .map((m) => ({
+      emailLower: normalizeEmail(m.emailLower || m.email),
+      name: String(m.name || "").trim()
+    }))
+    .filter((m) => m.emailLower && m.name);
+
+  const memberEmails = normalizedMembers.map((m) => m.emailLower);
+
+  const { data, error } = await supabase
+    .from("groups")
+    .update({ members: normalizedMembers, member_emails: memberEmails })
+    .eq("id", groupId)
+    .select("*")
+    .single();
+  throwIfError(error);
+  return mapGroupRow(data);
 };
 
 export const listGroupFeedbackForRecipient = async ({ groupId, recipientEmailLower }) => {

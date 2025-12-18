@@ -15,11 +15,15 @@ npm run dev
 
 1. Create a Supabase project: https://supabase.com
 2. In Supabase → SQL Editor: run `supabase/schema.sql`
-3. In Supabase → Authentication → Providers: enable `Email` (email/password)
+3. In Supabase → Authentication → Providers: enable `Email` (email/password) and `Anonymous` (for invite-code join)
 4. In Supabase → Project settings → API: copy:
    - Project URL → `VITE_SUPABASE_URL`
    - `anon` public key → `VITE_SUPABASE_ANON_KEY`
 5. Recommended for this app’s current flow: disable email confirmations (Supabase Auth → Email confirmations)
+
+## Supabase updates (when pulling new code)
+
+- If you've already run `supabase/schema.sql` before, run `supabase/patch.sql` in Supabase → SQL Editor to apply policy/function updates.
 
 ## Deploy to Netlify
 

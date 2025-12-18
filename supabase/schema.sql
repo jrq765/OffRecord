@@ -68,11 +68,8 @@ begin
     raise exception 'Invalid email or temporary password';
   end if;
 
-  if inv.redeemed_by_uid is not null and inv.redeemed_by_uid <> auth.uid() then
-    raise exception 'Invitation already redeemed';
-  end if;
-
-  if inv.redeemed_by_uid is null then
+  -- Allow re-redeeming from a new device/tab (latest session wins).
+  if inv.redeemed_by_uid is null or inv.redeemed_by_uid <> auth.uid() then
     update public.invitations
       set redeemed_by_uid = auth.uid(),
           redeemed_at = now()
@@ -244,15 +241,24 @@ using (
   )
 );
 
+drop policy if exists "submissions_create_member" on public.submissions;
 create policy "submissions_create_member"
 on public.submissions for insert
 to authenticated
 with check (
   respondent_uid = auth.uid()
-  and exists (
-    select 1 from public.invitations i
-    where i.group_id = submissions.group_id
-      and i.redeemed_by_uid = auth.uid()
+  and (
+    exists (
+      select 1 from public.invitations i
+      where i.group_id = submissions.group_id
+        and i.redeemed_by_uid = auth.uid()
+    )
+    or exists (
+      select 1 from public.groups g
+      where g.id = submissions.group_id
+        and g.host_uid = auth.uid()
+        and g.member_emails @> array[lower(auth.jwt()->>'email')]
+    )
   )
 );
 
@@ -268,26 +274,42 @@ using (
   )
 );
 
+drop policy if exists "feedback_read_recipient" on public.feedback;
 create policy "feedback_read_recipient"
 on public.feedback for select
 to authenticated
 using (
   exists (
+    select 1 from public.invitations i
+    where i.group_id = feedback.group_id
+      and i.redeemed_by_uid = auth.uid()
+      and i.email_lower = feedback.recipient_email_lower
+  )
+  or exists (
     select 1 from public.profiles p
     where p.id = auth.uid()
       and p.email_lower = feedback.recipient_email_lower
   )
 );
 
+drop policy if exists "feedback_create_member" on public.feedback;
 create policy "feedback_create_member"
 on public.feedback for insert
 to authenticated
 with check (
   respondent_uid = auth.uid()
-  and exists (
-    select 1 from public.invitations i
-    where i.group_id = feedback.group_id
-      and i.redeemed_by_uid = auth.uid()
+  and (
+    exists (
+      select 1 from public.invitations i
+      where i.group_id = feedback.group_id
+        and i.redeemed_by_uid = auth.uid()
+    )
+    or exists (
+      select 1 from public.groups g
+      where g.id = feedback.group_id
+        and g.host_uid = auth.uid()
+        and g.member_emails @> array[lower(auth.jwt()->>'email')]
+    )
   )
 );
 

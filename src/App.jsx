@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   Plus,
   Trash2,
+  UserMinus,
   LogOut,
   Mail,
   Copy,
@@ -14,6 +15,7 @@ import {
 import {
   createGroup,
   deleteGroupCascade,
+  getMemberIdentityFromInvites,
   getUserProfile,
   listGroupInvitations,
   listGroupFeedbackForRecipient,
@@ -22,6 +24,7 @@ import {
   listMemberGroups,
   redeemInvitationForUser,
   submitGroupResponse,
+  updateGroupMembers,
   upsertUserProfile
 } from "./db";
 import { supabase, supabaseInitError } from "./supabase";
@@ -91,13 +94,16 @@ const AuthProvider = ({ children }) => {
         return;
       }
 
-      const email = authUser.email || "";
-      const emailLower = String(email).toLowerCase();
-      const fallbackFirstName = authUser.user_metadata?.first_name || (emailLower ? emailLower.split("@")[0] : "");
+      const authEmail = authUser.email || "";
+      const emailLowerFromAuth = authEmail ? String(authEmail).toLowerCase() : "";
+      const emailLowerFromMetadata = String(authUser.user_metadata?.email_lower || "").toLowerCase();
+      const emailLower = emailLowerFromAuth || emailLowerFromMetadata;
+      const fallbackFirstName =
+        authUser.user_metadata?.first_name || (emailLower ? emailLower.split("@")[0] : "Anonymous");
 
       setUser({
         uid: authUser.id,
-        email,
+        email: authEmail || emailLower,
         emailLower,
         firstName: fallbackFirstName,
         isHost: false
@@ -116,16 +122,45 @@ const AuthProvider = ({ children }) => {
       const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), profileTimeoutMs));
 
       Promise.race([profilePromise, timeoutPromise]).then((profile) => {
-        if (cancelled || !profile) return;
-        setUser((prev) => {
-          if (!prev || prev.uid !== authUser.id) return prev;
-          return {
-            ...prev,
-            email: prev.email || profile.emailLower || prev.email,
-            emailLower: prev.emailLower || profile.emailLower || prev.emailLower,
-            firstName: profile.firstName || prev.firstName,
-            isHost: profile.role === "host"
-          };
+        if (cancelled) return;
+
+        if (profile) {
+          setUser((prev) => {
+            if (!prev || prev.uid !== authUser.id) return prev;
+            return {
+              ...prev,
+              email: prev.email || profile.emailLower || prev.email,
+              emailLower: prev.emailLower || profile.emailLower || prev.emailLower,
+              firstName: profile.firstName || prev.firstName,
+              isHost: profile.role === "host"
+            };
+          });
+          return;
+        }
+
+        if (emailLower) return;
+
+        const inviteTimeoutMs = 2500;
+        const invitePromise = (async () => {
+          try {
+            return await getMemberIdentityFromInvites({ uid: authUser.id });
+          } catch {
+            return null;
+          }
+        })();
+        const inviteTimeout = new Promise((resolve) => setTimeout(() => resolve(null), inviteTimeoutMs));
+
+        void Promise.race([invitePromise, inviteTimeout]).then((identity) => {
+          if (cancelled || !identity) return;
+          setUser((prev) => {
+            if (!prev || prev.uid !== authUser.id) return prev;
+            return {
+              ...prev,
+              email: prev.email || identity.emailLower,
+              emailLower: prev.emailLower || identity.emailLower,
+              firstName: identity.firstName || prev.firstName
+            };
+          });
         });
       });
     };
@@ -185,39 +220,69 @@ const AuthProvider = ({ children }) => {
     }
   };
 
+  const login = async (email, password) => {
+    const emailLower = String(email || "").trim().toLowerCase();
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: emailLower,
+      password: String(password || "")
+    });
+    if (error) throw error;
+
+    const authUser = data.user;
+    let role = "member";
+    let firstName = authUser.user_metadata?.first_name || (emailLower ? emailLower.split("@")[0] : "Anonymous");
+    let emailLowerOverride = emailLower;
+
+    try {
+      const profile = await getUserProfile({ uid: authUser.id });
+      if (profile) {
+        role = profile.role || role;
+        firstName = profile.firstName || firstName;
+        emailLowerOverride = profile.emailLower || emailLowerOverride;
+      }
+    } catch {
+      // ignore
+    }
+
+    setCurrentUser({ authUser, role, firstName, emailLowerOverride });
+  };
+
   const loginWithInvite = async (email, tempPassword) => {
     const emailLower = String(email || "").trim().toLowerCase();
     const password = String(tempPassword || "").trim();
 
     try {
-      let authUser;
       try {
-        const { data, error } = await supabase.auth.signInWithPassword({ email: emailLower, password });
-        if (error) throw error;
-        authUser = data.user;
-      } catch (err) {
-        const msg = String(err?.message || "").toLowerCase();
-        if (!msg.includes("invalid login credentials")) throw err;
-
-        const { data, error } = await supabase.auth.signUp({ email: emailLower, password });
-        if (error) {
-          const m = String(error.message || "").toLowerCase();
-          if (m.includes("already") || m.includes("registered")) {
-            throw new Error("Invalid email or temporary password");
-          }
-          throw error;
-        }
-        if (!data.session?.user) throw new Error("Disable email confirmation in Supabase Auth, then try again.");
-        authUser = data.session.user;
+        await supabase.auth.signOut();
+      } catch {
+        // ignore
       }
 
+      const { data: anonData, error: anonError } = await supabase.auth.signInAnonymously();
+      if (anonError) {
+        const msg = String(anonError.message || "").toLowerCase();
+        if (msg.includes("anonymous") && msg.includes("disabled")) {
+          throw new Error("Enable Anonymous sign-ins in Supabase Auth settings, then try again.");
+        }
+        throw anonError;
+      }
+
+      const authUser = anonData.user;
+
       const invite = await redeemInvitationForUser({ uid: authUser.id, emailLower, tempPassword: password });
-      await upsertUserProfile({
-        uid: authUser.id,
-        emailLower: invite.emailLower,
-        firstName: invite.name,
-        role: "member"
-      });
+
+      try {
+        await supabase.auth.updateUser({
+          data: {
+            email_lower: invite.emailLower,
+            first_name: invite.name,
+            role: "member"
+          }
+        });
+      } catch {
+        // ignore
+      }
+
       setCurrentUser({ authUser, role: "member", firstName: invite.name, emailLowerOverride: invite.emailLower });
       return invite;
     } catch (err) {
@@ -231,7 +296,7 @@ const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, signup, loginWithInvite, logout, loading }}>
+    <AuthContext.Provider value={{ user, signup, login, loginWithInvite, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );
@@ -316,13 +381,14 @@ const Textarea = ({ label, error, ...props }) => {
 
 const AuthScreen = () => {
   const [isHost, setIsHost] = useState(true);
+  const [joinMode, setJoinMode] = useState("invite"); // invite | signin
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [firstName, setFirstName] = useState("");
   const [tempPassword, setTempPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const { signup, loginWithInvite } = useAuth();
+  const { signup, login, loginWithInvite } = useAuth();
 
   const handleHostSignup = async () => {
     setError("");
@@ -340,7 +406,25 @@ const AuthScreen = () => {
 	    } finally {
 	      setLoading(false);
 	    }
-	  };
+		  };
+
+  const handleAccountLogin = async () => {
+    setError("");
+
+    if (!email || !password) {
+      setError("Please enter your email and password");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await login(email, password);
+    } catch (err) {
+      setError(err?.message || "Invalid credentials");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleMemberLogin = async () => {
     setError("");
@@ -362,7 +446,8 @@ const AuthScreen = () => {
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter") {
-      isHost ? handleHostSignup() : handleMemberLogin();
+      if (isHost) return handleHostSignup();
+      return joinMode === "invite" ? handleMemberLogin() : handleAccountLogin();
     }
   };
 
@@ -441,6 +526,25 @@ const AuthScreen = () => {
           </div>
         ) : (
           <div className="space-y-4">
+            <div className="flex gap-2 mb-1 bg-gray-700 p-1 rounded-lg">
+              <button
+                onClick={() => setJoinMode("invite")}
+                className={`flex-1 py-2 rounded-md transition ${
+                  joinMode === "invite" ? "bg-purple-600 text-white" : "text-gray-400"
+                }`}
+              >
+                Invite Code
+              </button>
+              <button
+                onClick={() => setJoinMode("signin")}
+                className={`flex-1 py-2 rounded-md transition ${
+                  joinMode === "signin" ? "bg-purple-600 text-white" : "text-gray-400"
+                }`}
+              >
+                Sign In
+              </button>
+            </div>
+
             <Input
               label="Email"
               type="email"
@@ -450,14 +554,25 @@ const AuthScreen = () => {
               onKeyDown={handleKeyDown}
             />
 
-            <Input
-              label="Temporary Password"
-              type="text"
-              placeholder="ABC123"
-              value={tempPassword}
-              onChange={(e) => setTempPassword(e.target.value.toUpperCase())}
-              onKeyDown={handleKeyDown}
-            />
+            {joinMode === "invite" ? (
+              <Input
+                label="Temporary Password"
+                type="text"
+                placeholder="ABC123"
+                value={tempPassword}
+                onChange={(e) => setTempPassword(e.target.value.toUpperCase())}
+                onKeyDown={handleKeyDown}
+              />
+            ) : (
+              <Input
+                label="Password"
+                type="password"
+                placeholder="••••••••"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={handleKeyDown}
+              />
+            )}
 
             {error && (
               <div className="bg-red-900/30 border border-red-500 rounded-lg p-3 text-red-400 text-sm">
@@ -465,12 +580,19 @@ const AuthScreen = () => {
               </div>
             )}
 
-            <Button onClick={handleMemberLogin} variant="primary" className="w-full" disabled={loading}>
-              {loading ? "Please wait..." : "Sign In"}
+            <Button
+              onClick={joinMode === "invite" ? handleMemberLogin : handleAccountLogin}
+              variant="primary"
+              className="w-full"
+              disabled={loading}
+            >
+              {loading ? "Please wait..." : joinMode === "invite" ? "Join Group" : "Sign In"}
             </Button>
 
             <p className="text-sm text-gray-400 text-center">
-              No account needed — use the invite credentials from your host
+              {joinMode === "invite"
+                ? "No account needed — use the invite credentials from your host"
+                : "Use your existing OffRecord account"}
             </p>
           </div>
         )}
@@ -509,9 +631,7 @@ const Dashboard = () => {
         const timeoutMs = 15000;
 
         const hostedPromise = withTimeout(listHostedGroups({ hostUid: user.uid }), timeoutMs);
-        const memberPromise = user.emailLower
-          ? withTimeout(listMemberGroups({ uid: user.uid, emailLower: user.emailLower }), timeoutMs)
-          : Promise.resolve([]);
+        const memberPromise = withTimeout(listMemberGroups({ uid: user.uid, emailLower: user.emailLower }), timeoutMs);
 
         const [hostedRes, memberRes] = await Promise.allSettled([hostedPromise, memberPromise]);
         clearTimeout(slowTimer);
@@ -552,9 +672,7 @@ const Dashboard = () => {
       const timeoutMs = 15000;
 
       const hostedPromise = withTimeout(listHostedGroups({ hostUid: user.uid }), timeoutMs);
-      const memberPromise = user.emailLower
-        ? withTimeout(listMemberGroups({ uid: user.uid, emailLower: user.emailLower }), timeoutMs)
-        : Promise.resolve([]);
+      const memberPromise = withTimeout(listMemberGroups({ uid: user.uid, emailLower: user.emailLower }), timeoutMs);
 
       const [hostedRes, memberRes] = await Promise.allSettled([hostedPromise, memberPromise]);
       clearTimeout(slowTimer);
@@ -694,6 +812,7 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
   const [showInvites, setShowInvites] = useState(false);
   const [showPDFModal, setShowPDFModal] = useState(false);
   const [statusNonce, setStatusNonce] = useState(0);
+  const [removingSelf, setRemovingSelf] = useState(false);
   const [status, setStatus] = useState({
     loading: true,
     completed: 0,
@@ -865,6 +984,36 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
               title="View Invitations"
             >
               <Mail className="w-5 h-5" />
+            </button>
+          )}
+          {user.isHost && status.userIsParticipant && (
+            <button
+              onClick={async () => {
+                if (removingSelf) return;
+                const ok = window.confirm(
+                  "Remove yourself from this group's member list? You can still manage the group as host."
+                );
+                if (!ok) return;
+
+                setRemovingSelf(true);
+                try {
+                  const remaining = (group.members || []).filter(
+                    (m) => String(m.emailLower || "").toLowerCase() !== user.emailLower
+                  );
+                  await updateGroupMembers({ groupId: group.id, members: remaining });
+                  setStatusNonce((n) => n + 1);
+                  await onRefresh?.();
+                } catch (err) {
+                  alert(err?.message || "Failed to update members");
+                } finally {
+                  setRemovingSelf(false);
+                }
+              }}
+              className="text-gray-500 hover:text-yellow-400 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Remove me from members"
+              disabled={removingSelf}
+            >
+              <UserMinus className="w-5 h-5" />
             </button>
           )}
           {user.isHost && !status.isComplete && (
