@@ -108,6 +108,21 @@ $$;
 
 grant execute on function public.redeem_invitation(text, text) to authenticated;
 
+-- Allow invite members to read their groups (works with anonymous auth: no email claim needed)
+alter table public.groups enable row level security;
+drop policy if exists "groups_read_host_or_member" on public.groups;
+create policy "groups_read_host_or_member"
+on public.groups for select
+to authenticated
+using (
+  host_uid = auth.uid()
+  or exists (
+    select 1 from public.invitations i
+    where i.group_id = groups.id
+      and i.redeemed_by_uid = auth.uid()
+  )
+);
+
 -- Allow participants to read submission progress
 drop policy if exists "submissions_read_host_or_member" on public.submissions;
 create policy "submissions_read_host_or_member"
