@@ -66,10 +66,13 @@ const mapFeedbackRow = (row) => {
   };
 };
 
-export const createGroup = async ({ name, hostUid, hostEmail, members }) => {
+export const createGroup = async ({ name, hostUid, hostEmail, hostName, members }) => {
   assertSupabase();
   const groupName = String(name || "").trim();
   if (!groupName) throw new Error("Group name is required");
+
+  const hostEmailLower = normalizeEmail(hostEmail);
+  const hostDisplayName = String(hostName || "").trim() || (hostEmailLower ? hostEmailLower.split("@")[0] : "Host");
 
   const normalizedMembers = (members || [])
     .map((m) => ({
@@ -79,20 +82,22 @@ export const createGroup = async ({ name, hostUid, hostEmail, members }) => {
     }))
     .filter((m) => m.emailLower && m.name && m.tempPassword);
 
-  if (normalizedMembers.length < 3) throw new Error("You need at least 3 members");
-
   const emails = normalizedMembers.map((m) => m.emailLower);
+  if (emails.includes(hostEmailLower)) throw new Error("You don't need to add yourself as a member");
   if (new Set(emails).size !== emails.length) throw new Error("Each member must have a unique email");
 
-  const memberEmails = normalizedMembers.map((m) => m.emailLower);
-  const membersForGroup = normalizedMembers.map(({ emailLower, name }) => ({ emailLower, name }));
+  const membersForGroup = [
+    { emailLower: hostEmailLower, name: hostDisplayName },
+    ...normalizedMembers.map(({ emailLower, name }) => ({ emailLower, name }))
+  ];
+  const memberEmails = membersForGroup.map((m) => m.emailLower);
 
   const { data: groupRow, error: groupError } = await supabase
     .from("groups")
     .insert({
       name: groupName,
       host_uid: hostUid,
-      host_email_lower: normalizeEmail(hostEmail),
+      host_email_lower: hostEmailLower,
       members: membersForGroup,
       member_emails: memberEmails
     })
@@ -100,22 +105,23 @@ export const createGroup = async ({ name, hostUid, hostEmail, members }) => {
     .single();
   throwIfError(groupError);
 
-  const invitesInsert = normalizedMembers.map((m) => ({
-    group_id: groupRow.id,
-    host_uid: hostUid,
-    host_email_lower: normalizeEmail(hostEmail),
-    email_lower: m.emailLower,
-    name: m.name,
-    temp_password: m.tempPassword,
-    redeemed_by_uid: null,
-    redeemed_at: null
-  }));
+  let inviteRows = [];
+  if (normalizedMembers.length > 0) {
+    const invitesInsert = normalizedMembers.map((m) => ({
+      group_id: groupRow.id,
+      host_uid: hostUid,
+      host_email_lower: hostEmailLower,
+      email_lower: m.emailLower,
+      name: m.name,
+      temp_password: m.tempPassword,
+      redeemed_by_uid: null,
+      redeemed_at: null
+    }));
 
-  const { data: inviteRows, error: inviteError } = await supabase
-    .from("invitations")
-    .insert(invitesInsert)
-    .select("*");
-  throwIfError(inviteError);
+    const res = await supabase.from("invitations").insert(invitesInsert).select("*");
+    throwIfError(res.error);
+    inviteRows = res.data || [];
+  }
 
   return {
     group: mapGroupRow(groupRow),

@@ -162,10 +162,14 @@ const AuthProvider = ({ children }) => {
         password,
         options: { data: { first_name: displayName } }
       });
-      if (error) throw error;
-      if (!data.session) {
-        throw new Error("Check your email to confirm your account, then sign in.");
+      if (error) {
+        const m = String(error.message || "").toLowerCase();
+        if (m.includes("email confirmation")) {
+          throw new Error("Disable email confirmation in Supabase Auth, then try again.");
+        }
+        throw error;
       }
+      if (!data.session) throw new Error("Disable email confirmation in Supabase Auth, then try again.");
       await upsertUserProfile({ uid: data.session.user.id, emailLower, firstName: displayName, role: "host" });
       setCurrentUser({ authUser: data.session.user, role: "host", firstName: displayName });
     } catch (err) {
@@ -196,10 +200,14 @@ const AuthProvider = ({ children }) => {
         if (!msg.includes("invalid login credentials")) throw err;
 
         const { data, error } = await supabase.auth.signUp({ email: emailLower, password });
-        if (error) throw error;
-        if (!data.session?.user) {
-          throw new Error("Email confirmation is enabled. Disable it in Supabase Auth settings, then try again.");
+        if (error) {
+          const m = String(error.message || "").toLowerCase();
+          if (m.includes("already") || m.includes("registered")) {
+            throw new Error("Invalid email or temporary password");
+          }
+          throw error;
         }
+        if (!data.session?.user) throw new Error("Disable email confirmation in Supabase Auth, then try again.");
         authUser = data.session.user;
       }
 
@@ -669,6 +677,7 @@ const Dashboard = () => {
         <CreateGroupModal
           hostUid={user.uid}
           hostEmail={user.email}
+          hostName={user.firstName}
           onClose={() => setShowCreateModal(false)}
           onCreated={async () => {
             await refreshGroups();
@@ -900,26 +909,22 @@ const GroupCard = ({ group, onDelete, onRefresh }) => {
 // CREATE GROUP MODAL
 // ============================================================================
 
-const CreateGroupModal = ({ hostUid, hostEmail, onClose, onCreated }) => {
+const CreateGroupModal = ({ hostUid, hostEmail, hostName, onClose, onCreated }) => {
   const [step, setStep] = useState(1);
   const [groupName, setGroupName] = useState("");
   const [createdInvitations, setCreatedInvitations] = useState([]);
-  const [members, setMembers] = useState([
-    { email: "", name: "" },
-    { email: "", name: "" },
-    { email: "", name: "" }
-  ]);
+  const [members, setMembers] = useState([{ email: "", name: "" }]);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
 
   const addMember = () => {
-    if (members.length < 6) {
+    if (members.length < 10) {
       setMembers([...members, { email: "", name: "" }]);
     }
   };
 
   const removeMember = (idx) => {
-    if (members.length > 3) {
+    if (members.length > 1) {
       setMembers(members.filter((_, i) => i !== idx));
     }
   };
@@ -940,12 +945,12 @@ const CreateGroupModal = ({ hostUid, hostEmail, onClose, onCreated }) => {
 
     const validMembers = members.filter((m) => m.email.trim() && m.name.trim());
 
-    if (validMembers.length < 3) {
-      setError("You need at least 3 members with email and name");
+    const hostEmailLower = String(hostEmail || "").trim().toLowerCase();
+    const emails = validMembers.map((m) => m.email.toLowerCase());
+    if (hostEmailLower && emails.includes(hostEmailLower)) {
+      setError("You’re already included — don’t add your own email again");
       return;
     }
-
-    const emails = validMembers.map((m) => m.email.toLowerCase());
     if (new Set(emails).size !== emails.length) {
       setError("Each member must have a unique email");
       return;
@@ -963,6 +968,7 @@ const CreateGroupModal = ({ hostUid, hostEmail, onClose, onCreated }) => {
         name: groupName,
         hostUid,
         hostEmail,
+        hostName,
         members: membersWithPasswords
       });
 
@@ -1014,9 +1020,24 @@ const CreateGroupModal = ({ hostUid, hostEmail, onClose, onCreated }) => {
         {step === 2 && (
           <div className="space-y-6">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-3">Add members (email + name)</label>
+              <label className="block text-sm font-medium text-gray-300 mb-3">Members (email + name)</label>
 
               <div className="space-y-3">
+                <div className="flex gap-2 opacity-90">
+                  <input
+                    className="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400"
+                    value={String(hostEmail || "").toLowerCase()}
+                    disabled
+                  />
+                  <input
+                    className="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400"
+                    value={String(hostName || "").trim()}
+                    disabled
+                  />
+                  <div className="px-4 py-3 rounded-lg bg-gray-900/30 border border-gray-700 text-gray-400 text-sm flex items-center">
+                    Host
+                  </div>
+                </div>
                 {members.map((member, idx) => (
                   <div key={idx} className="flex gap-2">
                     <input
@@ -1032,7 +1053,7 @@ const CreateGroupModal = ({ hostUid, hostEmail, onClose, onCreated }) => {
                       value={member.name}
                       onChange={(e) => updateMember(idx, "name", e.target.value)}
                     />
-                    {members.length > 3 && (
+                    {members.length > 1 && (
                       <button
                         onClick={() => removeMember(idx)}
                         className="px-4 py-3 bg-red-900/30 border border-red-500 rounded-lg text-red-400 hover:bg-red-900/50 transition"
@@ -1044,7 +1065,7 @@ const CreateGroupModal = ({ hostUid, hostEmail, onClose, onCreated }) => {
                 ))}
               </div>
 
-              {members.length < 6 && (
+              {members.length < 10 && (
                 <button onClick={addMember} className="mt-3 text-purple-400 hover:text-purple-300 text-sm flex items-center gap-2">
                   <Plus className="w-4 h-4" />
                   Add member
@@ -1630,6 +1651,48 @@ const SurveyScreen = ({ group, onComplete }) => {
   const totalPoints = recipients.length * 100;
   const allocatedPoints = responses.reduce((sum, r) => sum + r.score, 0);
   const remainingPoints = totalPoints - allocatedPoints;
+
+  if (recipients.length === 0) {
+    return (
+      <div className="fixed inset-0 bg-gray-900 z-50 overflow-y-auto">
+        <div className="max-w-2xl mx-auto px-4 py-8">
+          <div className="flex items-center justify-between mb-8">
+            <button onClick={onComplete} className="flex items-center gap-2 text-gray-400 hover:text-white transition">
+              <ArrowLeft className="w-5 h-5" />
+              <span>Back</span>
+            </button>
+          </div>
+          <Card className="text-center">
+            <h2 className="text-2xl font-bold text-white mb-2">No one else to review</h2>
+            <p className="text-gray-400 mb-6">This group only has you as a member.</p>
+            <Button
+              onClick={async () => {
+                setSubmitting(true);
+                try {
+                  await submitGroupResponse({
+                    groupId: group.id,
+                    respondentUid: user.uid,
+                    respondentEmailLower: user.emailLower,
+                    feedbackItems: []
+                  });
+                  setShowSuccess(true);
+                  setTimeout(() => onComplete(), 800);
+                } catch (err) {
+                  alert(err?.message || "Failed to submit");
+                } finally {
+                  setSubmitting(false);
+                }
+              }}
+              disabled={submitting}
+              className="w-full"
+            >
+              {submitting ? "Submitting..." : "Mark Complete"}
+            </Button>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   const currentMember = recipients[currentMemberIdx];
   const currentResponse = responses[currentMemberIdx];
