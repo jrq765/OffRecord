@@ -1067,7 +1067,14 @@ const CreateGroupModal = ({ hostUid, hostEmail, hostName, onClose, onCreated }) 
   const [members, setMembers] = useState([{ email: "", name: "" }]);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
-  const [emailStatus, setEmailStatus] = useState({ sending: false, sent: 0, failed: 0, error: "" });
+  const [emailStatus, setEmailStatus] = useState({
+    sending: false,
+    provider: "",
+    sent: 0,
+    failed: 0,
+    error: "",
+    failures: []
+  });
 
   const addMember = () => {
     if (members.length < 10) {
@@ -1136,21 +1143,25 @@ const CreateGroupModal = ({ hostUid, hostEmail, hostName, onClose, onCreated }) 
       await onCreated(result.group);
 
       if (result.invitations.length > 0) {
-        setEmailStatus({ sending: true, sent: 0, failed: 0, error: "" });
+        setEmailStatus({ sending: true, provider: "", sent: 0, failed: 0, error: "", failures: [] });
         try {
           const res = await sendGroupInviteEmails({ groupId: result.group.id });
           setEmailStatus({
             sending: false,
+            provider: String(res?.provider || ""),
             sent: Number(res?.sent || 0),
             failed: Number(res?.failed || 0),
-            error: ""
+            error: "",
+            failures: Array.isArray(res?.failures) ? res.failures : []
           });
         } catch (err) {
           setEmailStatus({
             sending: false,
+            provider: "",
             sent: 0,
             failed: result.invitations.length,
-            error: String(err?.message || "Email sending is not configured")
+            error: String(err?.message || "Email sending is not configured"),
+            failures: []
           });
         }
       }
@@ -1307,7 +1318,9 @@ const InvitationSuccess = ({ groupName, groupId, invitations, emailStatus, onClo
                 </p>
               ) : (
                 <p className="text-green-300 text-sm">
-                  Sent {emailStatus?.sent || 0} email(s){emailStatus?.failed ? ` • ${emailStatus.failed} failed` : ""}
+                  Sent {emailStatus?.sent || 0} email(s)
+                  {emailStatus?.provider ? ` via ${emailStatus.provider}` : ""}
+                  {emailStatus?.failed ? ` • ${emailStatus.failed} failed` : ""}
                 </p>
               )}
             </div>
@@ -1317,9 +1330,25 @@ const InvitationSuccess = ({ groupName, groupId, invitations, emailStatus, onClo
                 onClick={async () => {
                   try {
                     if (!groupId) return;
-                    await sendGroupInviteEmails({ groupId });
-                    alert("Invite emails sent.");
+                    setEmailStatus((s) => ({ ...s, sending: true, error: "" }));
+                    const res = await sendGroupInviteEmails({ groupId });
+                    setEmailStatus({
+                      sending: false,
+                      provider: String(res?.provider || ""),
+                      sent: Number(res?.sent || 0),
+                      failed: Number(res?.failed || 0),
+                      error: "",
+                      failures: Array.isArray(res?.failures) ? res.failures : []
+                    });
+
+                    if (Number(res?.failed || 0) > 0) {
+                      const first = (res?.failures || [])[0];
+                      alert(`Sent ${res?.sent || 0}, failed ${res?.failed || 0}.\n\nFirst error: ${first?.error || ""}`);
+                    } else {
+                      alert(`Sent ${res?.sent || 0} invite email(s) via ${res?.provider || "email"}.`);
+                    }
                   } catch (err) {
+                    setEmailStatus((s) => ({ ...s, sending: false, error: String(err?.message || "Failed") }));
                     alert(err?.message || "Failed to send emails");
                   }
                 }}

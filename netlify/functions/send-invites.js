@@ -45,23 +45,14 @@ const sendResendEmail = async ({ apiKey, from, to, subject, text, html }) => {
     const detail = await res.text().catch(() => "");
     throw new Error(`Resend failed (${res.status}): ${detail || res.statusText}`);
   }
+  const payload = await res.json().catch(() => ({}));
+  return { id: payload?.id || null };
 };
 
-const sendGmailEmail = async ({ user, appPassword, from, to, subject, text, html }) => {
-  const transporter = nodemailer.createTransport({
+const createGmailTransporter = ({ user, appPassword }) => {
+  return nodemailer.createTransport({
     service: "gmail",
-    auth: {
-      user,
-      pass: appPassword
-    }
-  });
-
-  await transporter.sendMail({
-    from: from || user,
-    to,
-    subject,
-    text,
-    html
+    auth: { user, pass: appPassword }
   });
 };
 
@@ -131,6 +122,12 @@ exports.handler = async (event) => {
 
     let sent = 0;
     const failures = [];
+    const results = [];
+
+    const gmailTransporter =
+      provider === "gmail"
+        ? createGmailTransporter({ user: gmailUser, appPassword: gmailAppPassword })
+        : null;
 
     for (const inv of invites || []) {
       const to = String(inv.email_lower || "").trim();
@@ -170,25 +167,46 @@ exports.handler = async (event) => {
 
       try {
         if (provider === "gmail") {
-          await sendGmailEmail({
-            user: gmailUser,
-            appPassword: gmailAppPassword,
-            from,
+          const info = await gmailTransporter.sendMail({
+            from: from || gmailUser,
             to,
             subject,
             text,
             html
           });
+          sent += 1;
+          if (results.length < 20) {
+            results.push({
+              to,
+              ok: true,
+              messageId: info?.messageId || null,
+              accepted: Array.isArray(info?.accepted) ? info.accepted : [],
+              rejected: Array.isArray(info?.rejected) ? info.rejected : []
+            });
+          }
         } else {
-          await sendResendEmail({ apiKey: resendApiKey, from, to, subject, text, html });
+          const info = await sendResendEmail({ apiKey: resendApiKey, from, to, subject, text, html });
+          sent += 1;
+          if (results.length < 20) {
+            results.push({ to, ok: true, id: info?.id || null });
+          }
         }
-        sent += 1;
       } catch (err) {
-        failures.push({ to, error: String(err?.message || err) });
+        const error = String(err?.message || err);
+        failures.push({ to, error });
+        if (results.length < 20) results.push({ to, ok: false, error });
       }
     }
 
-    return json(200, { ok: true, sent, failed: failures.length, failures });
+    return json(200, {
+      ok: true,
+      provider,
+      from,
+      sent,
+      failed: failures.length,
+      failures,
+      results
+    });
   } catch (err) {
     return json(500, { error: String(err?.message || err) });
   }
