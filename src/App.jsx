@@ -67,17 +67,37 @@ const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-	  const setCurrentUser = ({ authUser, role, firstName, emailLowerOverride }) => {
-	    const email = authUser.email || (emailLowerOverride ? String(emailLowerOverride) : "");
-	    setUser({
-	      uid: authUser.id,
-	      email,
-	      emailLower: emailLowerOverride ? String(emailLowerOverride).toLowerCase() : String(email).toLowerCase(),
-	      firstName: String(firstName || "").trim(),
-	      isHost: role === "host",
-	      isAnonymous: !authUser.email
-	    });
-	  };
+  const markInviteNeedsPassword = (emailLower) => {
+    if (typeof window === "undefined") return;
+    try {
+      window.sessionStorage.setItem("offrecord_invite_needs_password", "1");
+      if (emailLower) window.sessionStorage.setItem("offrecord_invite_email_lower", String(emailLower).toLowerCase());
+    } catch {
+      // ignore
+    }
+  };
+
+  const clearInviteNeedsPassword = () => {
+    if (typeof window === "undefined") return;
+    try {
+      window.sessionStorage.removeItem("offrecord_invite_needs_password");
+      window.sessionStorage.removeItem("offrecord_invite_email_lower");
+    } catch {
+      // ignore
+    }
+  };
+
+  const setCurrentUser = ({ authUser, role, firstName, emailLowerOverride }) => {
+    const email = authUser.email || (emailLowerOverride ? String(emailLowerOverride) : "");
+    setUser({
+      uid: authUser.id,
+      email,
+      emailLower: emailLowerOverride ? String(emailLowerOverride).toLowerCase() : String(email).toLowerCase(),
+      firstName: String(firstName || "").trim(),
+      isHost: role === "host",
+      isAnonymous: !authUser.email
+    });
+  };
 
   useEffect(() => {
     if (supabaseInitError || !supabase) {
@@ -306,15 +326,18 @@ const AuthProvider = ({ children }) => {
         // ignore
       }
 
+      markInviteNeedsPassword(invite.emailLower);
       setCurrentUser({ authUser, role: "member", firstName: invite.name, emailLowerOverride: invite.emailLower });
       return invite;
     } catch (err) {
+      clearInviteNeedsPassword();
       await supabase.auth.signOut();
       throw err;
     }
   };
 
   const logout = () => {
+    clearInviteNeedsPassword();
     return supabase.auth.signOut();
   };
 
@@ -2279,7 +2302,9 @@ const AppContent = () => {
   }
 
   if (!user) return <AuthScreen />;
-  if (!user.isHost && user.isAnonymous) return <CompleteInviteAccountScreen />;
+  const needsPassword =
+    typeof window !== "undefined" && window.sessionStorage?.getItem("offrecord_invite_needs_password") === "1";
+  if (!user.isHost && (user.isAnonymous || needsPassword)) return <CompleteInviteAccountScreen />;
   return <Dashboard />;
 };
 
@@ -2292,7 +2317,9 @@ const CompleteInviteAccountScreen = () => {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const emailLower = user?.emailLower || "";
+  const emailLower =
+    user?.emailLower ||
+    (typeof window !== "undefined" ? String(window.sessionStorage?.getItem("offrecord_invite_email_lower") || "") : "");
 
   const handleSave = async () => {
     setError("");
@@ -2329,6 +2356,13 @@ const CompleteInviteAccountScreen = () => {
           );
         }
         throw updateError;
+      }
+
+      try {
+        window.sessionStorage.removeItem("offrecord_invite_needs_password");
+        window.sessionStorage.removeItem("offrecord_invite_email_lower");
+      } catch {
+        // ignore
       }
     } catch (err) {
       setError(err?.message || "Failed to create account");
