@@ -1,4 +1,4 @@
-# Feedback Circle
+# OffRecord
 
 Anonymous peer feedback for small groups. This repo is a Vite + React + Tailwind app backed by Firebase (Auth + Firestore) so groups/invites/responses work across devices.
 
