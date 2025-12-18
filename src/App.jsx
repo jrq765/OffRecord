@@ -421,7 +421,12 @@ const AuthScreen = () => {
     try {
       await login(email, password);
     } catch (err) {
-      setError(err?.message || "Invalid credentials");
+      const msg = String(err?.message || "");
+      if (msg.toLowerCase().includes("invalid login credentials")) {
+        setError("No account found for that email/password. Use “Create Group” to create an account, or use “Invite Code” if you were invited.");
+      } else {
+        setError(msg || "Invalid credentials");
+      }
     } finally {
       setLoading(false);
     }
@@ -524,6 +529,18 @@ const AuthScreen = () => {
             <p className="text-sm text-gray-400 text-center">
               You'll be able to create groups and invite members
             </p>
+
+            <button
+              type="button"
+              className="w-full text-sm text-gray-400 hover:text-white transition"
+              onClick={() => {
+                setIsHost(false);
+                setJoinMode("signin");
+                setError("");
+              }}
+            >
+              Already have an account? Sign in
+            </button>
           </div>
         ) : (
           <div className="space-y-4">
@@ -595,6 +612,22 @@ const AuthScreen = () => {
                 ? "No account needed — use the invite credentials from your host"
                 : "Use your existing OffRecord account"}
             </p>
+
+            <button
+              type="button"
+              className="w-full text-sm text-gray-400 hover:text-white transition"
+              onClick={() => {
+                if (joinMode === "signin") {
+                  setIsHost(true);
+                  setError("");
+                } else {
+                  setJoinMode("signin");
+                  setError("");
+                }
+              }}
+            >
+              {joinMode === "signin" ? "Need to create a host account? Create one" : "Have an account? Sign in instead"}
+            </button>
           </div>
         )}
       </Card>
