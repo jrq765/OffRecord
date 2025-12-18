@@ -33,6 +33,39 @@ create index if not exists feedback_recipient_email_lower_idx on public.feedback
 alter table public.submissions enable row level security;
 alter table public.feedback enable row level security;
 
+-- Submit feedback in one transaction (RPC)
+create or replace function public.submit_feedback(group_id_input uuid, items jsonb)
+returns void
+language plpgsql
+as $$
+declare item jsonb;
+begin
+  insert into public.submissions (group_id, respondent_uid)
+  values (group_id_input, auth.uid());
+
+  for item in select * from jsonb_array_elements(items)
+  loop
+    insert into public.feedback (
+      group_id,
+      respondent_uid,
+      recipient_email_lower,
+      strengths,
+      improvements,
+      score
+    ) values (
+      group_id_input,
+      auth.uid(),
+      lower(coalesce(item->>'recipientEmailLower', item->>'recipient_email_lower')),
+      coalesce(item->>'strengths',''),
+      coalesce(item->>'improvements',''),
+      (coalesce(item->>'score','0'))::integer
+    );
+  end loop;
+end;
+$$;
+
+grant execute on function public.submit_feedback(uuid, jsonb) to authenticated;
+
 -- Allow invite re-use (latest session wins)
 create or replace function public.redeem_invitation(email_lower_input text, temp_password_input text)
 returns public.invitations
