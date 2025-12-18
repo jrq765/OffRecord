@@ -302,15 +302,15 @@ const AuthScreen = () => {
       return;
     }
 
-    setLoading(true);
-    try {
-      await signup(email, password, firstName);
-    } catch {
-      setError("Something went wrong. Please try again.");
-    } finally {
-      setLoading(false);
-    }
-  };
+	    setLoading(true);
+	    try {
+	      await signup(email, password, firstName);
+	    } catch (err) {
+	      setError(err?.message || "Something went wrong. Please try again.");
+	    } finally {
+	      setLoading(false);
+	    }
+	  };
 
   const handleMemberLogin = async () => {
     setError("");
