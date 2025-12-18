@@ -33,6 +33,17 @@ npm run dev
 - In Netlify → Site settings → Environment variables: set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 - In Supabase → Authentication → URL Configuration: add your Netlify domain to allowed redirect URLs.
 
+## Invite emails (optional, recommended)
+
+OffRecord can automatically email invite codes to members via a Netlify Function + Resend.
+
+In Netlify → Site settings → Environment variables, set:
+
+- `SUPABASE_URL` (same as `VITE_SUPABASE_URL`, but server-side)
+- `SUPABASE_SERVICE_ROLE_KEY` (Supabase Project Settings → API → service_role key) **do not expose to client**
+- `RESEND_API_KEY` (from https://resend.com)
+- `OFFRECORD_FROM_EMAIL` (optional; defaults to `onboarding@resend.dev`)
+
 ## If you see a white screen on Netlify
 
 1. Open DevTools Console: if you see “Missing Supabase env vars…”, add `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` in Netlify and redeploy.

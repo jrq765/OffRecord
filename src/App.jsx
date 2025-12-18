@@ -28,6 +28,7 @@ import {
   upsertUserProfile
 } from "./db";
 import { supabase, supabaseInitError } from "./supabase";
+import { sendGroupInviteEmails } from "./email";
 
 const AnonymousIcon = ({ className = "" }) => {
   return (
@@ -1062,9 +1063,11 @@ const CreateGroupModal = ({ hostUid, hostEmail, hostName, onClose, onCreated }) 
   const [step, setStep] = useState(1);
   const [groupName, setGroupName] = useState("");
   const [createdInvitations, setCreatedInvitations] = useState([]);
+  const [createdGroupId, setCreatedGroupId] = useState(null);
   const [members, setMembers] = useState([{ email: "", name: "" }]);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [emailStatus, setEmailStatus] = useState({ sending: false, sent: 0, failed: 0, error: "" });
 
   const addMember = () => {
     if (members.length < 10) {
@@ -1121,6 +1124,7 @@ const CreateGroupModal = ({ hostUid, hostEmail, hostName, onClose, onCreated }) 
         members: membersWithPasswords
       });
 
+      setCreatedGroupId(result.group.id);
       setCreatedInvitations(
         result.invitations.map((i) => ({
           email: i.emailLower,
@@ -1130,6 +1134,26 @@ const CreateGroupModal = ({ hostUid, hostEmail, hostName, onClose, onCreated }) 
       );
       setStep(3);
       await onCreated(result.group);
+
+      if (result.invitations.length > 0) {
+        setEmailStatus({ sending: true, sent: 0, failed: 0, error: "" });
+        try {
+          const res = await sendGroupInviteEmails({ groupId: result.group.id });
+          setEmailStatus({
+            sending: false,
+            sent: Number(res?.sent || 0),
+            failed: Number(res?.failed || 0),
+            error: ""
+          });
+        } catch (err) {
+          setEmailStatus({
+            sending: false,
+            sent: 0,
+            failed: result.invitations.length,
+            error: String(err?.message || "Email sending is not configured")
+          });
+        }
+      }
     } catch (err) {
       setError(err?.message || "Failed to create group");
     } finally {
@@ -1244,7 +1268,9 @@ const CreateGroupModal = ({ hostUid, hostEmail, hostName, onClose, onCreated }) 
         {step === 3 && (
           <InvitationSuccess
             groupName={groupName}
+            groupId={createdGroupId}
             invitations={createdInvitations}
+            emailStatus={emailStatus}
             onClose={() => onClose()}
           />
         )}
@@ -1257,7 +1283,7 @@ const CreateGroupModal = ({ hostUid, hostEmail, hostName, onClose, onCreated }) 
 // INVITATION SUCCESS SCREEN
 // ============================================================================
 
-const InvitationSuccess = ({ groupName, invitations, onClose }) => {
+const InvitationSuccess = ({ groupName, groupId, invitations, emailStatus, onClose }) => {
   return (
     <div className="space-y-6">
       <div className="text-center">
@@ -1267,6 +1293,44 @@ const InvitationSuccess = ({ groupName, invitations, onClose }) => {
         <h3 className="text-2xl font-bold text-white mb-2">Group Created!</h3>
         <p className="text-gray-400">Invitations ready to send for {groupName}</p>
       </div>
+
+      {invitations.length > 0 && (
+        <div className="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-white font-semibold text-sm">Email delivery</p>
+              {emailStatus?.sending ? (
+                <p className="text-gray-300 text-sm">Sending invite emails…</p>
+              ) : emailStatus?.error ? (
+                <p className="text-yellow-300 text-sm">
+                  Couldn’t send emails automatically ({emailStatus.error}). You can still copy the codes below.
+                </p>
+              ) : (
+                <p className="text-green-300 text-sm">
+                  Sent {emailStatus?.sent || 0} email(s){emailStatus?.failed ? ` • ${emailStatus.failed} failed` : ""}
+                </p>
+              )}
+            </div>
+            {!emailStatus?.sending && (
+              <Button
+                variant="secondary"
+                onClick={async () => {
+                  try {
+                    if (!groupId) return;
+                    await sendGroupInviteEmails({ groupId });
+                    alert("Invite emails sent.");
+                  } catch (err) {
+                    alert(err?.message || "Failed to send emails");
+                  }
+                }}
+                disabled={!groupId}
+              >
+                Resend
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="bg-gray-700/50 rounded-lg p-4">
         <h4 className="text-sm font-semibold text-white mb-3">Send these credentials to your members:</h4>
